@@ -4,7 +4,7 @@ import * as dotenv from 'dotenv'
 import emailRoutes from './routes/email_routes.js'
 import fileRoutes from './routes/file_routes.js'
 import './workers/email_workers.js'
-import './workers/file_workers.js'
+import './workers/file_worker.js'
 
 import { connectDB } from "./config/database.js";
 
