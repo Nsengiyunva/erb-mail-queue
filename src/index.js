@@ -2,9 +2,15 @@
 import express from "express";
 import * as dotenv from 'dotenv'
 import emailRoutes from './routes/email_routes.js'
+import fileRoutes from './routes/file_routes.js'
 import './workers/email_workers.js'
+import './workers/file_workers.js'
+
+import { connectDB } from "./config/database.js";
 
 dotenv.config();
+
+connectDB();
 
 const app = express();
 const PORT = 8782;
@@ -20,5 +26,6 @@ app.use(function (_, res, next) {
 });
 
 app.use('/api/erb/email', emailRoutes);
+app.use('/api/erb/file', fileRoutes);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
