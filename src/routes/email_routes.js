@@ -5,12 +5,26 @@ import emailQueue from '../queues/email_queues.js';
 
 const router = express.Router();
 
+router.get('/healthcheck', async ( req, res )  => {
+  try {
+    res.json(  {
+      sucess: true,
+      msssage: "Serverr running properly"
+    } );
+  } catch (error) {
+    res.json(  {
+      sucess: false,
+      error
+    } );
+  }
+} )
+
 router.post('/send-pdfs', async (req, res) => {
   try {
     const { recipients } = req.body;
     // recipients = [{ email: "person1@example.com", registrationNo: "TR84" }, ...]
 
-    const folderPath = '/path/to/pdf/folder';
+    const folderPath = '/var/ugpass/destination';
     const allFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.pdf'));
 
     const missingFiles = [];
