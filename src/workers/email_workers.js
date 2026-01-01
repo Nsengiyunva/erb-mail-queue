@@ -8,7 +8,7 @@ const worker = new Worker(
   async job => {
     try {
       const { to, subject, text, files } = job.data;
-      
+
       const attachments = files.map(file => ({
         filename: path.basename(file),
         path: file
@@ -22,7 +22,7 @@ const worker = new Worker(
             </div>
   
             <div style="padding: 25px;">
-              <h2>Dearr Engineer, 📄</h2>
+              <h2>Dear Engineer, 📄</h2>
               <p>Your professional practising license is attached to this email.</p>
               <p>Please download and keep it safely.</p>
   
@@ -45,7 +45,7 @@ const worker = new Worker(
       // await sendEmail({ to, subject, text, attachments });
 
     } catch (err) {
-      console.error(`Error sending email for job ${job.id}:`, err);
+      // console.error(`Error sending email for job ${job.id}:`, err);
       throw err; // rethrow so BullMQ can handle retries
     }
   },

@@ -19,10 +19,6 @@ Content-Type: application/json
     {
       "email": "kingbecks07@gmail.com",
       "registrationNo": "1423"
-    },
-    {
-      "email": "isaac.nsengiyunva@nita.go.ug",
-      "registrationNo": "1701"
     }
   ]
 }
