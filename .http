@@ -2,20 +2,27 @@
 # @url = https://auth.cert.works.go.ug/api
 @url = https://helper.erb.go.ug
 
+###
+GET  {{url}}/api/erb/email/healthcheck
+Content-Type: application/json
+
 ### Health Checkpoint API
 POST {{url}}/api/erb/email/send-pdfs
 Content-Type: application/json
 
 {
-    "recipients": [
-        {
-            email: "isaacnsengiyunva@gmail.com", registrationNo: "1944"
-        },
-        {
-            email: "kingbecks07@gmail.com", registrationNo: "1423"
-        },
-        {
-            email: "isaac.nsengiyunva@nita.go.ug", registrationNo: "1701"
-        }
-    ]
+  "recipients": [
+    {
+      "email": "isaacnsengiyunva@gmail.com",
+      "registrationNo": "1944"
+    },
+    {
+      "email": "kingbecks07@gmail.com",
+      "registrationNo": "1423"
+    },
+    {
+      "email": "isaac.nsengiyunva@nita.go.ug",
+      "registrationNo": "1701"
+    }
+  ]
 }
