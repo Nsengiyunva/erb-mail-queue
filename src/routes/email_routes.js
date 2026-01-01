@@ -1,7 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import emailQueue from '../queues/email_queue.js'; 
+import emailQueue from '../queues/email_queues.js'; 
 
 const router = express.Router();
 
