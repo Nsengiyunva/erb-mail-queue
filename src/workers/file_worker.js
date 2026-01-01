@@ -6,9 +6,9 @@ import { sequelize } from "../config/database.js";
 import ErbUploadFileModel from "../models/ErbUploadFile.js";
 import { DataTypes } from "sequelize";
 
-const FILE_DIR = "/var/ugpass/source";
+const FILE_DIR = process.env.FILE_DIR || "/var/ugpass/source";
 
-// Init model
+// Initialize model
 const ErbUploadFile = ErbUploadFileModel(sequelize, DataTypes);
 
 const worker = new Worker(
@@ -24,11 +24,20 @@ const worker = new Worker(
     try {
       let fileBuffer;
 
-      // ⚠️ If you receive a Blob from React PDF, convert it to Buffer
-      if (buffer instanceof Blob) {
+      // ✅ Convert to Buffer if needed
+      if (buffer instanceof Buffer) {
+        fileBuffer = buffer;
+      } else if (buffer instanceof Blob) {
+        // If you somehow pass a browser Blob
         fileBuffer = Buffer.from(await buffer.arrayBuffer());
+      } else if (buffer instanceof ArrayBuffer) {
+        fileBuffer = Buffer.from(buffer);
+      } else if (typeof buffer === "object") {
+        // Sometimes JSON-like object comes from frontend
+        // Convert it to Buffer
+        fileBuffer = Buffer.from(JSON.stringify(buffer));
       } else {
-        fileBuffer = buffer; // already a Buffer
+        throw new TypeError("Invalid file buffer type");
       }
 
       // 1️⃣ Write file to disk
@@ -50,12 +59,12 @@ const worker = new Worker(
     } catch (error) {
       await transaction.rollback();
 
-      // cleanup partially written file
+      // Cleanup partially written file
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
 
-      throw error; // BullMQ retry
+      throw error; // let BullMQ retry
     }
   },
   {
