@@ -1,0 +1,21 @@
+# @url = http://localhost:8753/api
+# @url = https://auth.cert.works.go.ug/api
+@url = https://helper.erb.go.ug
+
+### Health Checkpoint API
+POST {{url}}/api/erb/email/send-pdfs
+Content-Type: application/json
+
+{
+    "recipients": [
+        {
+            email: "isaacnsengiyunva@gmail.com", registrationNo: "1944"
+        },
+        {
+            email: "kingbecks07@gmail.com", registrationNo: "1423"
+        },
+        {
+            email: "isaac.nsengiyunva@nita.go.ug", registrationNo: "1701"
+        }
+    ]
+}

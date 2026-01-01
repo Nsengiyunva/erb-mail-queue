@@ -1,5 +1,5 @@
 import { Worker } from 'bullmq';
-import emailQueue from '../queues/email_queue.js'; // make sure filename matches
+import emailQueue from '../queues/email_queues.js'; // make sure filename matches
 import { sendEmail } from '../utils/mailer.js';
 import path from 'path';
 
