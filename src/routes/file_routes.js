@@ -28,3 +28,6 @@ router.post("/upload-license", upload.single("file"), async (req, res) => {
   
     res.json({ message: "File upload queued successfully" });
   });
+
+
+  export default router;
