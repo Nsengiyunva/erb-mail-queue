@@ -2,7 +2,7 @@ import { Worker } from "bullmq";
 import connection from "../redis/connection.js";
 import fs from "fs";
 import path from "path";
-import { sequelize } from "../database/index.js";
+import { sequelize } from "../config/database.js";
 import ErbUploadFileModel from "../models/ErbUploadFile.js";
 import { DataTypes } from "sequelize";
 
