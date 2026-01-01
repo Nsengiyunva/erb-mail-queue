@@ -2,13 +2,13 @@ import { Worker } from "bullmq";
 import connection from "../redis/connection.js";
 import fs from "fs";
 import path from "path";
-import { sequelize } from "../config/database.js";
+import { sequelize } from "../database/index.js";
 import ErbUploadFileModel from "../models/ErbUploadFile.js";
 import { DataTypes } from "sequelize";
 
 const FILE_DIR = "/var/ugpass/source";
 
-// Init model (no sync)
+// Init model
 const ErbUploadFile = ErbUploadFileModel(sequelize, DataTypes);
 
 const worker = new Worker(
@@ -22,8 +22,17 @@ const worker = new Worker(
     const transaction = await sequelize.transaction();
 
     try {
+      let fileBuffer;
+
+      // ⚠️ If you receive a Blob from React PDF, convert it to Buffer
+      if (buffer instanceof Blob) {
+        fileBuffer = Buffer.from(await buffer.arrayBuffer());
+      } else {
+        fileBuffer = buffer; // already a Buffer
+      }
+
       // 1️⃣ Write file to disk
-      fs.writeFileSync(filePath, buffer);
+      fs.writeFileSync(filePath, fileBuffer);
 
       // 2️⃣ Insert DB record
       await ErbUploadFile.create(
@@ -41,17 +50,17 @@ const worker = new Worker(
     } catch (error) {
       await transaction.rollback();
 
-      // Cleanup partially written file
+      // cleanup partially written file
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
 
-      throw error; // allow BullMQ retries
+      throw error; // BullMQ retry
     }
   },
   {
     connection,
-    concurrency: 1, // sequential file writes
+    concurrency: 1,
   }
 );
 
