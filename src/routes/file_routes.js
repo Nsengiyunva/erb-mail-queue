@@ -13,7 +13,7 @@ const router = express.Router();
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload-license", upload.single("file"), async (req, res) => {
     const { file } = req;
     const { rowId } = req.body;
   
