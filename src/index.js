@@ -5,6 +5,7 @@ import emailRoutes from './routes/email_routes.js'
 import fileRoutes from './routes/file_routes.js'
 import './workers/email_workers.js'
 import './workers/file_worker.js'
+import cors from 'cors'
 
 import { connectDB } from "./config/database.js";
 
@@ -16,6 +17,8 @@ const app = express();
 const PORT = 8782;
    
 app.use(express.json());
+
+app.use( cors() );
 
 app.use(function (_, res, next) {
   res.header("Access-Control-Allow-Origin", "*"); 
