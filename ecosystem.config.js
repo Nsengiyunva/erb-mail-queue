@@ -1,4 +1,4 @@
-export default {
+module.exports = {
     apps: [
       {
         name: 'email-erb-api',
@@ -6,7 +6,7 @@ export default {
         watch: false,
         env: {
           NODE_ENV: 'production',
-          PORT: 3000,
+          PORT: 8782,
           SMTP_HOST: 'relay.umcs.go.ug',
           SMTP_PORT: 587,
           SMTP_USER: 'licenses@erb.go.ug',

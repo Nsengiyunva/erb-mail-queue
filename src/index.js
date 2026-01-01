@@ -7,7 +7,7 @@ import './workers/email_workers.js'
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 8780;
+const PORT = 8782;
    
 app.use(express.json());
 
