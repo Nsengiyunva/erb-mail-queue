@@ -17,7 +17,7 @@ const worker = new Worker(
     const { buffer, originalName, rowId } = job.data;
 
     const fileName = `${Date.now()}_${originalName}`;
-    const filePath = path.join(FILE_DIR, fileName);
+    const filePath = path.join(FILE_DIR, originalName);
 
     const transaction = await sequelize.transaction();
 
