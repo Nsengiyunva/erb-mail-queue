@@ -21,7 +21,7 @@ module.exports = {
       },
       {
         name: 'email-erb-worker',
-        script: './src/workers/emailWorker.js',
+        script: './src/workers/email_workers.js',
         watch: false,
         env: {
           NODE_ENV: 'production',
