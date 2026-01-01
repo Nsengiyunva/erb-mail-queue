@@ -4,7 +4,7 @@ import path from "path";
 import express from 'express';
 // import fs from 'fs';
 import multer from "multer";
-import fileQueue from '../queues/file_queues'
+import fileQueue from '../queues/file_queues.js'
 
 
 
