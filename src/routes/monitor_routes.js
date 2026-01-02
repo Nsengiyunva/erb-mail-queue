@@ -17,20 +17,31 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-router.post('/batch-uploads', upload.array('files', 10), async (req, res) => {
-  const batchId = `batch_${Date.now()}`;
+router.post('/upload_batch', upload.array('files', 10), async (req, res) => {
+  // const batchId = `batch_${Date.now()}`;
 
-  const files = req.files.map(f => ({
-    originalName: f.originalname,
-    filename: f.filename
-  }));
+  // const files = req.files.map(f => ({
+  //   originalName: f.originalname,
+  //   filename: f.filename
+  // }));
 
-  await fileProcessQueue.add('process-batch', {
-    batchId,
-    files
-  }, { jobId: batchId });
+  // await fileProcessQueue.add('process-batch', {
+  //   batchId,
+  //   files
+  // }, { jobId: batchId });
 
-  res.json({ batchId, count: files.length });
+  // res.json({ batchId, count: files.length });
+  try {
+    res.json(  {
+      sucess: true,
+      msssage: "Server running properly..."
+    } );
+  } catch (error) {
+    res.json(  {
+      sucess: false,
+      error
+    } );
+  }
 });
 
 

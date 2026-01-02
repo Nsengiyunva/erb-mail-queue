@@ -9,7 +9,7 @@ router.get('/healthcheck', async ( req, res )  => {
   try {
     res.json(  {
       sucess: true,
-      msssage: "Serverr running properly"
+      msssage: "Server running properly..."
     } );
   } catch (error) {
     res.json(  {
