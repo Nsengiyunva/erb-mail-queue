@@ -146,7 +146,7 @@ module.exports = {
         SMTP_HOST: "relay.umcs.go.ug",
         SMTP_PORT: 587,
         SMTP_USER: "licenses@erb.go.ug",
-        SMTP_PASS: process.env.SMTP_PASS,
+        SMTP_PASS: "081IZCno7sEghbh2LwbfGVtB",
 
         /* Redis */
         REDIS_HOST: "127.0.0.1",
@@ -184,7 +184,7 @@ module.exports = {
         SMTP_HOST: "relay.umcs.go.ug",
         SMTP_PORT: 587,
         SMTP_USER: "licenses@erb.go.ug",
-        SMTP_PASS: process.env.SMTP_PASS,
+        SMTP_PASS: "081IZCno7sEghbh2LwbfGVtB",
 
         REDIS_HOST: "127.0.0.1",
         REDIS_PORT: 6379
