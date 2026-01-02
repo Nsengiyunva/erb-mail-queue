@@ -1,5 +1,6 @@
 import express from 'express';
-import fs from 'fs';
+// import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import emailQueue from '../queues/email_queues.js'; 
 
