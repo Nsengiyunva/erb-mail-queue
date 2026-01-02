@@ -97,7 +97,7 @@ router.post('/send-pdfs', async (req, res) => {
 
 
 //testing this out
-router.post('/upload_batch', upload.array('files', 10), async (req, res) => {
+router.get('/upload_batch', async (req, res) => {
   // const batchId = `batch_${Date.now()}`;
 
   // const files = req.files.map(f => ({
@@ -114,7 +114,7 @@ router.post('/upload_batch', upload.array('files', 10), async (req, res) => {
   try {
     res.json(  {
       sucess: true,
-      msssage: "Server running properly..."
+      msssage: "We are here"
     } );
   } catch (error) {
     res.json(  {
