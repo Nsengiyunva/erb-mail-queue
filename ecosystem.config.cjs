@@ -5,7 +5,7 @@ module.exports = {
     ========================== */
     {
       name: "erb-api",
-      script: "./src/app.js",
+      script: "./src/index.js",
       instances: 1,
       exec_mode: "fork",
       watch: false,
@@ -45,7 +45,7 @@ module.exports = {
     ========================== */
     {
       name: "erb-email-worker",
-      script: "./src/workers/email_worker.js",
+      script: "./src/workers/email_workers.js",
       instances: 1,
       exec_mode: "fork",
       watch: false,
