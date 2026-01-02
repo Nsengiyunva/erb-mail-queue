@@ -3,7 +3,26 @@ import fs from 'fs';
 import path from 'path';
 import emailQueue from '../queues/email_queues.js'; 
 
+import multer from 'multer';
+// import path from 'path';
+// import fs from 'fs/promises';
+import fileProcessQueue from '../queues/file_process_queue.js';
+
 const router = express.Router();
+
+//----
+const SOURCE_DIR = '/var/ugpass/source';
+
+await fs.mkdir(SOURCE_DIR, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, SOURCE_DIR),
+  filename: (_, file, cb) => cb(null, file.originalname)
+});
+
+const upload = multer({ storage });
+
+//-----
 
 router.get('/healthcheck', async ( req, res )  => {
   try {
@@ -64,6 +83,37 @@ router.post('/send-pdfs', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to enqueue email jobs' });
+  }
+});
+
+
+
+
+//testing this out
+router.post('/upload_batch', upload.array('files', 10), async (req, res) => {
+  // const batchId = `batch_${Date.now()}`;
+
+  // const files = req.files.map(f => ({
+  //   originalName: f.originalname,
+  //   filename: f.filename
+  // }));
+
+  // await fileProcessQueue.add('process-batch', {
+  //   batchId,
+  //   files
+  // }, { jobId: batchId });
+
+  // res.json({ batchId, count: files.length });
+  try {
+    res.json(  {
+      sucess: true,
+      msssage: "Server running properly..."
+    } );
+  } catch (error) {
+    res.json(  {
+      sucess: false,
+      error
+    } );
   }
 });
 
