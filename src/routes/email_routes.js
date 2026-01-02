@@ -34,12 +34,12 @@ const upload = multer({ storage });
 router.get('/healthcheck', async ( req, res )  => {
   try {
     res.json(  {
-      sucess: true,
+      success: true,
       msssage: "Server running properly..."
     } );
   } catch (error) {
     res.json(  {
-      sucess: false,
+      success: false,
       error
     } );
   }
@@ -111,17 +111,10 @@ router.get('/uploads', async (req, res) => {
   // }, { jobId: batchId });
 
   // res.json({ batchId, count: files.length });
-  try {
-    res.json(  {
-      sucess: true,
-      msssage: "We are here"
-    } );
-  } catch (error) {
-    res.json(  {
-      sucess: false,
-      error
-    } );
-  }
+  res.json(  {
+    success: true,
+    msssage: "UPLOADS is running properly..."
+  } );
 });
 
 export default router;

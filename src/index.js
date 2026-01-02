@@ -42,6 +42,6 @@ console.log("here-1",listEndpoints(app));
 app.use('/api/erb/email', emailRoutes);
 app.use('/api/erb/file', fileRoutes);
 
-app.use('/test/erb/', monitorRoutes);
+// app.use('/test/erb/', monitorRoutes);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
