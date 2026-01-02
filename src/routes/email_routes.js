@@ -16,8 +16,14 @@ const SOURCE_DIR = '/var/ugpass/source';
 await fs.mkdir(SOURCE_DIR, { recursive: true });
 
 const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, SOURCE_DIR),
-  filename: (_, file, cb) => cb(null, file.originalname)
+  destination: (req, file, cb) => {
+    if (!cb) throw new Error("Multer callback missing");
+    cb(null, SOURCE_DIR);
+  },
+  filename: (req, file, cb) => {
+    if (!cb) throw new Error("Multer callback missing");
+    cb(null, file.originalname);
+  }
 });
 
 const upload = multer({ storage });
