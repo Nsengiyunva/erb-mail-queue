@@ -1,71 +1,184 @@
+// import express from 'express';
+// // import fs from 'fs';
+// import fs from 'fs/promises';
+// import path from 'path';
+// import emailQueue from '../queues/email_queues.js'; 
+
+// import multer from 'multer';
+// // import path from 'path';
+// // import fs from 'fs/promises';
+// import fileProcessQueue from '../queues/file_process_queue.js';
+
+// const router = express.Router();
+
+// //----
+// const SOURCE_DIR = '/var/ugpass/source';
+
+// await fs.mkdir(SOURCE_DIR, { recursive: true });
+
+// const storage = multer.diskStorage({
+//   destination: (req, file, cb) => {
+//     if (!cb) throw new Error("Multer callback missing");
+//     cb(null, SOURCE_DIR);
+//   },
+//   filename: (req, file, cb) => {
+//     if (!cb) throw new Error("Multer callback missing");
+//     cb(null, file.originalname);
+//   }
+// });
+
+// const upload = multer({ storage });
+
+// //-----
+
+// router.get('/healthcheck', async ( req, res )  => {
+//   try {
+//     res.json(  {
+//       success: true,
+//       msssage: "Server running properly..."
+//     } );
+//   } catch (error) {
+//     res.json(  {
+//       success: false,
+//       error
+//     } );
+//   }
+// } )
+
+// router.post('/send-pdfs', async (req, res) => {
+//   try {
+//     const { recipients } = req.body;
+//     // recipients = [{ email: "person1@example.com", registrationNo: "TR84" }, ...]
+
+//     const folderPath = '/var/ugpass/destination';
+//     const allFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.pdf'));
+
+//     const missingFiles = [];
+
+//     for (const recipient of recipients) {
+//       const matchingFile = allFiles.find(f => f.includes(recipient.registrationNo));
+//       if (!matchingFile) {
+//         console.warn(`No PDF found for ${recipient.registrationNo}`);
+//         missingFiles.push(recipient.registrationNo);
+//         continue;
+//       }
+
+//       const filePath = path.join(folderPath, matchingFile);
+
+//       // Add job to BullMQ queue with retry logic
+//       await emailQueue.add(
+//         'send-pdf',
+//         {
+//           to: recipient.email,
+//           subject: `Your PDF for ${recipient.registrationNo}`,
+//           text: 'Please find attached your PDF.',
+//           files: [filePath]
+//         },
+//         {
+//           attempts: 3, // Retry up to 3 times if sending fails
+//           backoff: { type: 'exponential', delay: 5000 }, // 5s, 10s, 20s between retries
+//           removeOnComplete: true,
+//           removeOnFail: false
+//         }
+//       );
+//     }
+
+//     res.json({
+//       message: 'Email jobs added to queue',
+//       missingFiles
+//     });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: 'Failed to enqueue email jobs' });
+//   }
+// });
+
+// router.get('/healthcheck_3', async (req, res) => {
+//   res.json({
+//     success: true,
+//     message: "UPLOADS is running properly..."
+//   });
+// });
+
+
+// //testing this out
+// router.get('/healthcheck_2', async (req, res) => {
+//   // const batchId = `batch_${Date.now()}`;
+
+//   // const files = req.files.map(f => ({
+//   //   originalName: f.originalname,
+//   //   filename: f.filename
+//   // }));
+
+//   // await fileProcessQueue.add('process-batch', {
+//   //   batchId,
+//   //   files
+//   // }, { jobId: batchId });
+
+//   // res.json({ batchId, count: files.length });
+//   res.json(  {
+//     success: true,
+//     msssage: "UPLOADS is running properly..."
+//   } );
+// });
+
+// export default router;
+
+
 import express from 'express';
-// import fs from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
-import emailQueue from '../queues/email_queues.js'; 
-
 import multer from 'multer';
-// import path from 'path';
-// import fs from 'fs/promises';
+import emailQueue from '../queues/email_queues.js';
 import fileProcessQueue from '../queues/file_process_queue.js';
 
 const router = express.Router();
 
-//----
 const SOURCE_DIR = '/var/ugpass/source';
 
-await fs.mkdir(SOURCE_DIR, { recursive: true });
+// Ensure source directory exists
+fs.mkdir(SOURCE_DIR, { recursive: true })
+  .then(() => console.log(`SOURCE_DIR ready: ${SOURCE_DIR}`))
+  .catch(err => console.error('Failed to create SOURCE_DIR:', err));
 
+// Multer setup
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    if (!cb) throw new Error("Multer callback missing");
-    cb(null, SOURCE_DIR);
-  },
-  filename: (req, file, cb) => {
-    if (!cb) throw new Error("Multer callback missing");
-    cb(null, file.originalname);
-  }
+  destination: (req, file, cb) => cb(null, SOURCE_DIR),
+  filename: (req, file, cb) => cb(null, file.originalname)
 });
 
 const upload = multer({ storage });
 
-//-----
+// Healthcheck routes
+router.get('/healthcheck', async (req, res) => {
+  res.json({ success: true, message: "Server running properly..." });
+});
 
-router.get('/healthcheck', async ( req, res )  => {
-  try {
-    res.json(  {
-      success: true,
-      msssage: "Server running properly..."
-    } );
-  } catch (error) {
-    res.json(  {
-      success: false,
-      error
-    } );
-  }
-} )
+router.get('/healthcheck_2', async (req, res) => {
+  res.json({ success: true, message: "UPLOADS is running properly..." });
+});
 
+router.get('/healthcheck_3', async (req, res) => {
+  res.json({ success: true, message: "Another upload check OK" });
+});
+
+// Send PDFs route
 router.post('/send-pdfs', async (req, res) => {
   try {
     const { recipients } = req.body;
-    // recipients = [{ email: "person1@example.com", registrationNo: "TR84" }, ...]
-
     const folderPath = '/var/ugpass/destination';
-    const allFiles = fs.readdirSync(folderPath).filter(f => f.endsWith('.pdf'));
-
+    const allFiles = (await fs.readdir(folderPath)).filter(f => f.endsWith('.pdf'));
     const missingFiles = [];
 
     for (const recipient of recipients) {
       const matchingFile = allFiles.find(f => f.includes(recipient.registrationNo));
       if (!matchingFile) {
-        console.warn(`No PDF found for ${recipient.registrationNo}`);
         missingFiles.push(recipient.registrationNo);
         continue;
       }
 
       const filePath = path.join(folderPath, matchingFile);
 
-      // Add job to BullMQ queue with retry logic
       await emailQueue.add(
         'send-pdf',
         {
@@ -75,51 +188,19 @@ router.post('/send-pdfs', async (req, res) => {
           files: [filePath]
         },
         {
-          attempts: 3, // Retry up to 3 times if sending fails
-          backoff: { type: 'exponential', delay: 5000 }, // 5s, 10s, 20s between retries
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
           removeOnComplete: true,
           removeOnFail: false
         }
       );
     }
 
-    res.json({
-      message: 'Email jobs added to queue',
-      missingFiles
-    });
+    res.json({ message: 'Email jobs added to queue', missingFiles });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to enqueue email jobs' });
   }
-});
-
-router.get('/healthcheck_3', async (req, res) => {
-  res.json({
-    success: true,
-    message: "UPLOADS is running properly..."
-  });
-});
-
-
-//testing this out
-router.get('/healthcheck_2', async (req, res) => {
-  // const batchId = `batch_${Date.now()}`;
-
-  // const files = req.files.map(f => ({
-  //   originalName: f.originalname,
-  //   filename: f.filename
-  // }));
-
-  // await fileProcessQueue.add('process-batch', {
-  //   batchId,
-  //   files
-  // }, { jobId: batchId });
-
-  // res.json({ batchId, count: files.length });
-  res.json(  {
-    success: true,
-    msssage: "UPLOADS is running properly..."
-  } );
 });
 
 export default router;
