@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "bullmq": "^5.66.4",
+    "chokidar": "^5.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",

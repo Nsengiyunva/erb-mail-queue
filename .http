@@ -22,3 +22,8 @@ Content-Type: application/json
     }
   ]
 }
+
+
+### get batch status
+GET {{url}}/api/batch/status/:batchId
+Content-Type: application/json

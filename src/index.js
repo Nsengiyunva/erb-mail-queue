@@ -3,8 +3,14 @@ import express from "express";
 import * as dotenv from 'dotenv'
 import emailRoutes from './routes/email_routes.js'
 import fileRoutes from './routes/file_routes.js'
+
+import monitorRoutes from './routes/monitor_routes.js';
+
 import './workers/email_workers.js'
 import './workers/file_worker.js'
+import './workers/file_process_worker.js';
+import './workers/file_monitor_worker.js';
+
 import cors from 'cors'
 
 import { connectDB } from "./config/database.js";
@@ -30,5 +36,7 @@ app.use(function (_, res, next) {
 
 app.use('/api/erb/email', emailRoutes);
 app.use('/api/erb/file', fileRoutes);
+
+app.use( '/api/batch', monitorRoutes)
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
