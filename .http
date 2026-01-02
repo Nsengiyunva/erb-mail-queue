@@ -3,7 +3,7 @@
 @url = https://helper.erb.go.ug
 
 ###
-GET  {{url}}/api/test
+GET  {{url}}/api/erb/monitor/healthcheck_2
 Content-Type: application/json
 
 ### Health Checkpoint API

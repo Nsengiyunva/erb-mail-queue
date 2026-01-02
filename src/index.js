@@ -78,6 +78,8 @@ app.use((_, res, next) => {
   next();
 });
 
+app.set('trust proxy', true);  // Trust Nginx as a proxy
+
 // Mount API routes
 app.use('/api/erb/email', emailRoutes);
 app.use('/api/erb/file', fileRoutes);
