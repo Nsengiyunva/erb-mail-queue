@@ -11,6 +11,8 @@ import './workers/file_worker.js'
 import './workers/file_process_worker.js';
 import './workers/file_monitor_worker.js';
 
+import listEndpoints from 'express-list-endpoints';
+
 import cors from 'cors'
 
 import { connectDB } from "./config/database.js";
@@ -33,6 +35,9 @@ app.use(function (_, res, next) {
   res.header("Access-Control-Allow-Credentials", "true");
   next();
 });
+
+
+console.log("here-1",listEndpoints(app));
 
 app.use('/api/erb/email', emailRoutes);
 app.use('/api/erb/file', fileRoutes);
