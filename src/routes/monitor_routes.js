@@ -76,6 +76,14 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+router.get('/healthcheck_2', async (req, res) => {
+  res.json({ success: true, message: "UPLOADS is running properly..." });
+});
+
+router.get('/healthcheck_3', async (req, res) => {
+  res.json({ success: true, message: "Another upload check OK" });
+});
+
 // ========================
 // Upload batch endpoint
 // ========================

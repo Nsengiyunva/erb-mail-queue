@@ -154,13 +154,6 @@ router.get('/healthcheck', async (req, res) => {
   res.json({ success: true, message: "Server running properly..." });
 });
 
-router.get('/healthcheck_2', async (req, res) => {
-  res.json({ success: true, message: "UPLOADS is running properly..." });
-});
-
-router.get('/healthcheck_3', async (req, res) => {
-  res.json({ success: true, message: "Another upload check OK" });
-});
 
 // Send PDFs route
 router.post('/send-pdfs', async (req, res) => {
