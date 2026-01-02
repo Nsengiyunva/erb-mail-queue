@@ -37,6 +37,6 @@ app.use(function (_, res, next) {
 app.use('/api/erb/email', emailRoutes);
 app.use('/api/erb/file', fileRoutes);
 
-app.use( '/api/batch', monitorRoutes)
+app.use( '/test/erb/', monitorRoutes)
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
