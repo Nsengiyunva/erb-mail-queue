@@ -93,7 +93,12 @@ router.post('/send-pdfs', async (req, res) => {
   }
 });
 
-
+router.get('/healthcheck_3', async (req, res) => {
+  res.json({
+    success: true,
+    message: "UPLOADS is running properly..."
+  });
+});
 
 
 //testing this out
