@@ -45,20 +45,32 @@
 // // app.use('/test/erb/', monitorRoutes);
 
 // app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-
 import express from 'express';
 import * as dotenv from 'dotenv';
+import cors from 'cors';
+
+// Import routes
 import emailRoutes from './routes/email_routes.js';
+import fileRoutes from './routes/file_routes.js';
+import monitorRoutes from './routes/monitor_routes.js';
+
+// Import workers (so they start automatically)
+import './workers/email_workers.js';
+import './workers/file_worker.js';
+import './workers/file_process_worker.js';
+import './workers/file_monitor_worker.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8782;
 
+// Body parser
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // CORS
+app.use(cors());
 app.use((_, res, next) => {
   res.header("Access-Control-Allow-Origin", "*"); 
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
@@ -66,12 +78,20 @@ app.use((_, res, next) => {
   next();
 });
 
-// Mount email routes
+// Mount API routes
 app.use('/api/erb/email', emailRoutes);
+app.use('/api/erb/file', fileRoutes);
+app.use('/api/erb/monitor', monitorRoutes);
 
 // Optional test route
 app.get('/api/test', (req, res) => res.json({ ok: true }));
 
+// Fallback route for 404
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
