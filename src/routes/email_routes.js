@@ -97,7 +97,7 @@ router.post('/send-pdfs', async (req, res) => {
 
 
 //testing this out
-router.get('/uploads', async (req, res) => {
+router.get('/healthcheck_2', async (req, res) => {
   // const batchId = `batch_${Date.now()}`;
 
   // const files = req.files.map(f => ({
