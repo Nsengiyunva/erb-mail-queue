@@ -1,6 +1,5 @@
 import { Worker } from 'bullmq';
 import connection from "../redis/connection.js";
-// import emailQueue from '../queues/email_queues.js';
 import { sendEmail, sendStyledMail } from '../utils/mailer.js';
 import path from 'path';
 

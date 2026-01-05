@@ -6,23 +6,23 @@
 GET  {{url}}/api/erb/monitor/healthcheck_2
 Content-Type: application/json
 
-### Health Checkpoint API
+### Send PDFs
 POST {{url}}/api/erb/email/send-pdfs
 Content-Type: application/json
 
 {
   "recipients": [
-    {
-      "email": "isaacnsengiyunva@gmail.com",
-      "registrationNo": "1944"
-    },
-    {
-      "email": "kingbecks07@gmail.com",
-      "registrationNo": "1423"
-    }
+    { "email": 	"wanyageof@hotmail.com" , "registrationNo":"734" },
+    { "email": 	"patrick.ojok@gmail.com" , "registrationNo":"802" },
+    { "email": 	"rapolot@gmail.com" , "registrationNo":"980" },
+    { "email": 	"johnson.mugisha@gmail.com" , "registrationNo":"1097" },
+    { "email": 	"derrick.ssebuguzi@gmail.com" , "registrationNo":"1151" },
+    { "email": 	"jronnie@gmail.com" , "registrationNo":"670" },
+    { "email": 	"rnbarongo@yahoo.com" , "registrationNo":"671" }
   ]
 }
 
+ 
 
 ### get batch status
 GET {{url}}/api/batch/status/:batchId
