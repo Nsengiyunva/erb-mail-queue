@@ -130,7 +130,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import multer from 'multer';
 import emailQueue from '../queues/email_queues.js';
-import fileProcessQueue from '../queues/file_process_queue.js';
+// import fileProcessQueue from '../queues/file_process_queue.js';
 
 const router = express.Router();
 
@@ -156,44 +156,126 @@ router.get('/healthcheck', async (req, res) => {
 
 
 // Send PDFs route
+// router.post('/send-pdfs', async (req, res) => {
+//   try {
+//     const { recipients } = req.body;
+//     const folderPath = '/var/ugpass/destination';
+//     const allFiles = (await fs.readdir(folderPath)).filter(f => f.endsWith('.pdf'));
+//     const missingFiles = [];
+
+//     for (const recipient of recipients) {
+//       const matchingFile = allFiles.find(f => f.includes(recipient.registrationNo));
+//       if (!matchingFile) {
+//         missingFiles.push(recipient.registrationNo);
+//         continue;
+//       }
+
+//       const filePath = path.join(folderPath, matchingFile);
+
+//       await emailQueue.add(
+//         'send-pdf',
+//         {
+//           to: recipient.email,
+//           subject: `Your PDF for ${recipient.registrationNo}`,
+//           text: 'Please find attached your PDF.',
+//           files: [filePath]
+//         },
+//         {
+//           attempts: 3,
+//           backoff: { type: 'exponential', delay: 5000 },
+//           removeOnComplete: true,
+//           removeOnFail: false
+//         }
+//       );
+//     }
+
+//     res.json({ message: 'Email jobs added to queue', missingFiles });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: 'Failed to enqueue email jobs' });
+//   }
+// });
 router.post('/send-pdfs', async (req, res) => {
   try {
     const { recipients } = req.body;
+
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return res.status(400).json({ error: 'Recipients array is required' });
+    }
+
     const folderPath = '/var/ugpass/destination';
-    const allFiles = (await fs.readdir(folderPath)).filter(f => f.endsWith('.pdf'));
+
+    // Read PDFs ONCE
+    const allFiles = await fs.readdir(folderPath);
+    const pdfFiles = allFiles.filter(f => f.endsWith('.pdf'));
+
+    // Index PDFs for fast lookup
+    const pdfMap = new Map();
+    for (const file of pdfFiles) {
+      pdfMap.set(file, path.join(folderPath, file));
+    }
+
+    const jobs = [];
     const missingFiles = [];
 
     for (const recipient of recipients) {
-      const matchingFile = allFiles.find(f => f.includes(recipient.registrationNo));
-      if (!matchingFile) {
+      if (!recipient?.email || !recipient?.registrationNo) {
+        continue;
+      }
+
+      const matchedEntry = [...pdfMap.entries()].find(
+        ([filename]) => filename.includes(recipient.registrationNo)
+      );
+
+      if (!matchedEntry) {
         missingFiles.push(recipient.registrationNo);
         continue;
       }
 
-      const filePath = path.join(folderPath, matchingFile);
+      const [, filePath] = matchedEntry;
 
-      await emailQueue.add(
-        'send-pdf',
-        {
+      jobs.push({
+        name: 'sendEmail',
+        data: {
           to: recipient.email,
-          subject: `Your PDF for ${recipient.registrationNo}`,
-          text: 'Please find attached your PDF.',
+          registrationNo: recipient.registrationNo, // 🔑 REQUIRED
           files: [filePath]
         },
-        {
+        opts: {
           attempts: 3,
-          backoff: { type: 'exponential', delay: 5000 },
+          backoff: {
+            type: 'exponential',
+            delay: 3000
+          },
           removeOnComplete: true,
           removeOnFail: false
         }
-      );
+      });
     }
 
-    res.json({ message: 'Email jobs added to queue', missingFiles });
+    if (jobs.length === 0) {
+      return res.status(400).json({
+        error: 'No valid email jobs created',
+        missingFiles
+      });
+    }
+
+    // BULK enqueue (FAST)
+    await emailQueue.addBulk(jobs);
+
+    return res.status(202).json({
+      status: 'queued',
+      totalRecipients: recipients.length,
+      queued: jobs.length,
+      missingFiles
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to enqueue email jobs' });
+    console.error('[send-pdfs]', err);
+    return res.status(500).json({
+      error: 'Failed to enqueue email jobs'
+    });
   }
 });
+
 
 export default router;

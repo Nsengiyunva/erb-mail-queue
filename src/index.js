@@ -68,6 +68,7 @@ const PORT = process.env.PORT || 8782;
 // Body parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// app.use(express.json({ limit: '1mb' }));
 
 // CORS
 app.use(cors());
