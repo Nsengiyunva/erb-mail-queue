@@ -72,7 +72,9 @@ import connection from '../redis/connection.js';
 import { sendStyledMail } from '../utils/mailer.js';
 import path from 'path';
 import fs from 'fs/promises';
-import { EmailLog } from '../models/index.js';
+import db from '../models/index.js';
+
+const EmailLog = db.sequelize.models.EmailLog;
 
 
 const worker = new Worker(

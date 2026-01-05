@@ -1,7 +1,5 @@
 
 missing file:
-// { "email": 	"dwjwasin@yahoo.com" , "registrationNo":"TR156" }
-
     { "email": 	"tushar@quality.co.ug" , "registrationNo":"1988" },
     { "email": 	"sitraik@hotmail.com" , "registrationNo":"1525" },
     { "email": 	"denoalunyu@gmail.com", "registrationNo":"917" },
@@ -64,4 +62,18 @@ s
     { "email": 	"sowinodon@gmail.com" , "registrationNo":"2017" },
     { "email": 	"bidasala@yahoo.com" , "registrationNo":"589" },
     { "email": 	"mpulaparthy@hotmail.com" , "registrationNo":"566" },
-    { "email": 	"samsonsevume@gmail.com" , "registrationNo":"1294" }
+    { "email": 	"samsonsevume@gmail.com" , "registrationNo":"1294" },
+    { "email": 	"akiikijackline1@yahoo.com" , "registrationNo":"TR133" },
+{ "email": 	"akiikijackline1@yahoo.com" , "registrationNo":"TR183" },
+{ "email": 	"akiikijackline1@yahoo.com" , "registrationNo":"TR192" },
+{ "email": 	"akiikijackline1@yahoo.com" , "registrationNo":"TR193" },
+{ "email": 	"akiikijackline1@yahoo.com" , "registrationNo":"TR196" },
+{ "email": 	"jinghaibinyes@gmail.com" , "registrationNo":"TR197" },
+{ "email": 	"cicouganda@gmail.com", "registrationNo":"TR198" },
+{ "email": 	"cicouganda@gmail.com", "registrationNo":"TR199" },
+{ "email": 	"cicouganda@gmail.com", "registrationNo":"TR201" },
+{ "email": 	"lijie9922@99.com" , "registrationNo":"TR202" },
+{ "email": 	"441685976@99.com" , "registrationNo":"TR203" },
+{ "email": 	"529301327@99.com" , "registrationNo":"TR204" },
+{ "email": 	"khattar.ramy@hotmail.com", "registrationNo":"TR243" },
+{ "email": 	"amskatahoire@gmail.com", "registrationNo":"246" },

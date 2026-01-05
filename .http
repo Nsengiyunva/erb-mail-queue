@@ -12,11 +12,8 @@ Content-Type: application/json
 
 {
   "recipients": [
-    { "email": 	"tushar@quality.co.ug" , "registrationNo":"1988" },
-    { "email": 	"sitraik@hotmail.com" , "registrationNo":"1525" },
-    { "email": 	"denoalunyu@gmail.com", "registrationNo":"917" },
-    { "email": 	"inkuyahaga@gmail.com" , "registrationNo":"652" },
-    { "email": 	"james.harera@gmail.com" , "registrationNo":"1953" }
+    { "email": 	"isaacnsengiyunva@gmail.com" , "registrationNo":"1423" },
+    { "email": 	"kingbecks07@gmail.com" , "registrationNo":"1423" }
   ]
 }
 
