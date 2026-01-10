@@ -53,6 +53,7 @@ import cors from 'cors';
 import emailRoutes from './routes/email_routes.js';
 import fileRoutes from './routes/file_routes.js';
 import monitorRoutes from './routes/monitor_routes.js';
+import receiptRoutes from './routes/receipt_routes.js';
 
 // Import workers (so they start automatically)
 import './workers/email_workers.js';
@@ -92,6 +93,7 @@ app.use((req, res, next) => {
 app.use('/api/erb/email', emailRoutes);
 app.use('/api/erb/file', fileRoutes);
 app.use('/api/erb/monitor', monitorRoutes);
+app.use('/api/erb/receipt', receiptRoutes);
 
 // Optional test route
 app.get('/api/test', (req, res) => res.json({ ok: true }));

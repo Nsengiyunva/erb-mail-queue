@@ -12,8 +12,7 @@ Content-Type: application/json
 
 {
   "recipients": [
-    { "email": 	"isaacnsengiyunva@gmail.com" , "registrationNo":"1423" },
-    { "email": 	"kingbecks07@gmail.com" , "registrationNo":"1423" }
+    
   ]
 }
 
@@ -22,3 +21,7 @@ Content-Type: application/json
 ### get batch status
 GET {{url}}/api/batch/status/:batchId
 Content-Type: application/json
+
+
+### upload receipt
+POST {{url}}//api/erb/receipt/upload-receipt
