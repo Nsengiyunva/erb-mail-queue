@@ -6,6 +6,7 @@ import { sequelize } from "../config/database.js";
 import ReceiptModel from "../models/Receipt.js";
 import { DataTypes } from "sequelize";
 import { sendStyledMail } from "../utils/mailer.js";
+import receiptQueue from '../queues/receipt_queue.js'
 
 // Init model
 const Receipt = ReceiptModel(sequelize, DataTypes);

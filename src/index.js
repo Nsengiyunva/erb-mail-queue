@@ -61,6 +61,7 @@ import "./workers/email_workers.js";
 import "./workers/file_worker.js";
 import "./workers/file_process_worker.js";
 import "./workers/file_monitor_worker.js";
+import "./workers/receipt_worker.js"
 
 dotenv.config();
 
