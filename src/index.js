@@ -74,20 +74,13 @@ app.set("trust proxy", true);
 // --------------------
 // ✅ CORS (MUST BE FIRST)
 // --------------------
-app.use(
-  cors({
-    origin: [
-      "http://localhost:3000",
-      "https://helper.erb.go.ug",
-    ],
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-  })
-);
 
-// ✅ Explicit OPTIONS handler
-app.options("*", cors());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+}));
+
 
 // --------------------
 // Body parsers
