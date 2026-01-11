@@ -45,65 +45,88 @@
 // // app.use('/test/erb/', monitorRoutes);
 
 // app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-import express from 'express';
-import * as dotenv from 'dotenv';
-import cors from 'cors';
 
-// Import routes
-import emailRoutes from './routes/email_routes.js';
-import fileRoutes from './routes/file_routes.js';
-import monitorRoutes from './routes/monitor_routes.js';
-import receiptRoutes from './routes/receipt_routes.js';
+import express from "express";
+import * as dotenv from "dotenv";
+import cors from "cors";
 
-// Import workers (so they start automatically)
-import './workers/email_workers.js';
-import './workers/file_worker.js';
-import './workers/file_process_worker.js';
-import './workers/file_monitor_worker.js';
+// Routes
+import emailRoutes from "./routes/email_routes.js";
+import fileRoutes from "./routes/file_routes.js";
+import monitorRoutes from "./routes/monitor_routes.js";
+import receiptRoutes from "./routes/receipt_routes.js";
+
+// Workers
+import "./workers/email_workers.js";
+import "./workers/file_worker.js";
+import "./workers/file_process_worker.js";
+import "./workers/file_monitor_worker.js";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8782;
 
-// Body parser
+// Trust proxy (NGINX)
+app.set("trust proxy", true);
+
+// --------------------
+// ✅ CORS (MUST BE FIRST)
+// --------------------
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "https://helper.erb.go.ug",
+    ],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  })
+);
+
+// ✅ Explicit OPTIONS handler
+app.options("*", cors());
+
+// --------------------
+// Body parsers
+// --------------------
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-// app.use(express.json({ limit: '1mb' }));
 
-// CORS
-app.use(cors());
-app.use((_, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*"); 
-  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-  next();
-});
-
-app.set('trust proxy', true); 
-
+// --------------------
+// 🔐 HTTPS redirect (NOT for OPTIONS)
+// --------------------
 app.use((req, res, next) => {
-  if (req.protocol === 'http') {
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  if (req.protocol === "http") {
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
   }
+
   next();
 });
 
-// Mount API routes
-app.use('/api/erb/email', emailRoutes);
-app.use('/api/erb/file', fileRoutes);
-app.use('/api/erb/monitor', monitorRoutes);
-app.use('/api/erb/receipt', receiptRoutes);
+// --------------------
+// Routes
+// --------------------
+app.use("/api/erb/email", emailRoutes);
+app.use("/api/erb/file", fileRoutes);
+app.use("/api/erb/monitor", monitorRoutes);
+app.use("/api/erb/receipt", receiptRoutes);
 
-// Optional test route
-app.get('/api/test', (req, res) => res.json({ ok: true }));
+// Test route
+app.get("/api/test", (_, res) => res.json({ ok: true }));
 
-// Fallback route for 404
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
+// 404 fallback
+app.use((_, res) => {
+  res.status(404).json({ error: "Endpoint not found" });
 });
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
+
