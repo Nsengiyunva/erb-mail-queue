@@ -5,7 +5,7 @@ import path from "path";
 import { sequelize } from "../config/database.js";
 import ReceiptModel from "../models/Receipt.js";
 import { DataTypes } from "sequelize";
-import receiptQueue from "../queues/receiptQueue.js";
+import receiptQueue from "../queues/receipt_queue.js";
 
 const router = express.Router();
 const Receipt = ReceiptModel(sequelize, DataTypes);
