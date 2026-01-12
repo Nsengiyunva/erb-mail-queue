@@ -76,7 +76,6 @@ import * as db from '../models/index.js';
 
 const EmailLog = db.sequelize.models.EmailLog;
 
-
 const worker = new Worker(
   'emailQueue',
   async job => {
@@ -89,19 +88,26 @@ const worker = new Worker(
     let emailLog;
 
     try {
-      job.updateProgress(5);
+      await job.updateProgress(5);
 
       if (!to) {
         throw new Error('Missing recipient email');
       }
 
       /**
-       * Create or reuse DB log
-       * (important for retries)
+       * Create or reuse DB log (idempotent for retries)
        */
       emailLog = await EmailLog.findOne({
         where: { job_id: job.id }
       });
+
+      // Skip resend if already sent (retry-safe)
+      if (emailLog?.status === 'SENT') {
+        console.log(
+          `[EmailWorker] Job ${job.id} already SENT → skipping`
+        );
+        return { success: true, skipped: true };
+      }
 
       if (!emailLog) {
         emailLog = await EmailLog.create({
@@ -112,14 +118,32 @@ const worker = new Worker(
         });
       }
 
-      // Validate & prepare attachments
+      // Validate & prepare attachments (HARD SAFETY CHECK)
       const attachments = [];
+      const expectedFilename =
+        registrationNo
+          ? `${String(registrationNo).trim()}.pdf`.toLowerCase()
+          : null;
 
       for (const file of files) {
         try {
+          const filename = path.basename(file);
+
+          // Prevent wrong-license attachment under ALL circumstances
+          if (
+            expectedFilename &&
+            filename.toLowerCase() !== expectedFilename
+          ) {
+            console.error(
+              `[EmailWorker] Attachment mismatch for ${to}: expected ${expectedFilename}, got ${filename}`
+            );
+            continue;
+          }
+
           await fs.access(file);
+
           attachments.push({
-            filename: path.basename(file),
+            filename,
             path: file
           });
         } catch {
@@ -129,12 +153,10 @@ const worker = new Worker(
         }
       }
 
-      job.updateProgress(40);
+      await job.updateProgress(40);
 
       if (attachments.length === 0) {
-        console.warn(
-          `[EmailWorker] No valid attachments for ${to}`
-        );
+        throw new Error('No valid attachments found');
       }
 
       const htmlContent = `
@@ -157,7 +179,7 @@ const worker = new Worker(
           </div>
         </div>`;
 
-      job.updateProgress(70);
+      await job.updateProgress(70);
 
       await sendStyledMail(
         to,
@@ -171,7 +193,7 @@ const worker = new Worker(
         sent_at: new Date()
       });
 
-      job.updateProgress(100);
+      await job.updateProgress(100);
 
       return { success: true, to };
     } catch (err) {
@@ -180,7 +202,7 @@ const worker = new Worker(
         err
       );
 
-      if (emailLog) {
+      if (emailLog && emailLog.status !== 'SENT') {
         await emailLog.update({
           status: 'FAILED',
           error_message: err.message
@@ -220,4 +242,5 @@ worker.on('error', err => {
 });
 
 export default worker;
+
 

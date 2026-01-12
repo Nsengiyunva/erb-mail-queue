@@ -154,47 +154,6 @@ router.get('/healthcheck', async (req, res) => {
   res.json({ success: true, message: "Server running properly..." });
 });
 
-
-// Send PDFs route
-// router.post('/send-pdfs', async (req, res) => {
-//   try {
-//     const { recipients } = req.body;
-//     const folderPath = '/var/ugpass/destination';
-//     const allFiles = (await fs.readdir(folderPath)).filter(f => f.endsWith('.pdf'));
-//     const missingFiles = [];
-
-//     for (const recipient of recipients) {
-//       const matchingFile = allFiles.find(f => f.includes(recipient.registrationNo));
-//       if (!matchingFile) {
-//         missingFiles.push(recipient.registrationNo);
-//         continue;
-//       }
-
-//       const filePath = path.join(folderPath, matchingFile);
-
-//       await emailQueue.add(
-//         'send-pdf',
-//         {
-//           to: recipient.email,
-//           subject: `Your PDF for ${recipient.registrationNo}`,
-//           text: 'Please find attached your PDF.',
-//           files: [filePath]
-//         },
-//         {
-//           attempts: 3,
-//           backoff: { type: 'exponential', delay: 5000 },
-//           removeOnComplete: true,
-//           removeOnFail: false
-//         }
-//       );
-//     }
-
-//     res.json({ message: 'Email jobs added to queue', missingFiles });
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ error: 'Failed to enqueue email jobs' });
-//   }
-// });
 router.post('/send-pdfs', async (req, res) => {
   try {
     const { recipients } = req.body;
@@ -207,9 +166,11 @@ router.post('/send-pdfs', async (req, res) => {
 
     // Read PDFs ONCE
     const allFiles = await fs.readdir(folderPath);
-    const pdfFiles = allFiles.filter(f => f.endsWith('.pdf'));
 
-    // Index PDFs for fast lookup
+    // Only allow numeric PDFs like 639.pdf
+    const pdfFiles = allFiles.filter(file => /^\d+\.pdf$/.test(file));
+
+    // Map: filename -> absolute path
     const pdfMap = new Map();
     for (const file of pdfFiles) {
       pdfMap.set(file, path.join(folderPath, file));
@@ -223,22 +184,22 @@ router.post('/send-pdfs', async (req, res) => {
         continue;
       }
 
-      const matchedEntry = [...pdfMap.entries()].find(
-        ([filename]) => filename.includes(recipient.registrationNo)
-      );
+      // Normalize registration number
+      const regNo = String(recipient.registrationNo).trim();
+      const expectedFilename = `${regNo}.pdf`;
 
-      if (!matchedEntry) {
-        missingFiles.push(recipient.registrationNo);
+      const filePath = pdfMap.get(expectedFilename);
+
+      if (!filePath) {
+        missingFiles.push(regNo);
         continue;
       }
-
-      const [, filePath] = matchedEntry;
 
       jobs.push({
         name: 'sendEmail',
         data: {
           to: recipient.email,
-          registrationNo: recipient.registrationNo, // 🔑 REQUIRED
+          registrationNo: regNo,
           files: [filePath]
         },
         opts: {
