@@ -170,6 +170,10 @@ router.post('/send-pdfs', async (req, res) => {
     // Only allow numeric PDFs like 639.pdf
     const pdfFiles = allFiles.filter(file => /^\d+\.pdf$/.test(file));
 
+    if (pdfFiles.length !== new Set(pdfFiles).size) {
+      throw new Error('Duplicate PDF filenames detected');
+    }    
+
     // Map: filename -> absolute path
     const pdfMap = new Map();
     for (const file of pdfFiles) {
