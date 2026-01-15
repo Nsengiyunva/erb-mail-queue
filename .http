@@ -12,7 +12,31 @@ Content-Type: application/json
 
 {
   "recipients": [
-    
+  { "registrationNo": "676", "email": "kingbecks07@gmail.com"  },
+  { "registrationNo": "1909", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1882", "email":  "kingbecks07@gmail.com"  },
+  { "registrationNo": "623", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1690", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1428", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "650", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1141", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "866", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1941", "email":  "kingbecks07@gmail.com"  },
+  { "registrationNo": "1869", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1673", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "932", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "757", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "746", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "743", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "642", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "851", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "986", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1186", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1223", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1692", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1732", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1755", "email":  "isaacnsengiyunva@gmail.com"  },
+  { "registrationNo": "1185", "email":  "kingbecks07@gmail.com"  }
   ]
 }
 
