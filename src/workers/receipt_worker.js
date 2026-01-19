@@ -46,7 +46,7 @@ const worker = new Worker(
 
             <div style="padding: 25px;">
               <h2>Dear Engineer, 📄</h2>
-              <p>Your receipt</p>
+              <p>Attached is Your Payment Receipt</p>
 
               <p>
                 Regards,<br/>
