@@ -10,7 +10,7 @@ import receiptQueue from "../queues/receipt_queue.js";
 const router = express.Router();
 const Receipt = ReceiptModel(sequelize, DataTypes);
 
-const FILE_DIR = process.env.FILE_DIR || "/var/ugpass/source";
+const FILE_DIR = "/home/user1/ERB/uploads";
 
 // Ensure upload directory exists
 if (!fs.existsSync(FILE_DIR)) {
