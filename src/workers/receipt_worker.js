@@ -62,7 +62,7 @@ const worker = new Worker(
       // 4️⃣ Send mail
       await sendStyledMail(
         email,
-        "RE: YOUR ERB PAYMENT LICENSE",
+        "RE: YOUR ERB PAYMENT RECEIPT",
         htmlContent,
         attachments
       );
