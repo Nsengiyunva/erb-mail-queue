@@ -30,6 +30,21 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
+
+//receipt uploads
+const storage_receipt = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, FILE_DIR);
+  },
+  filename: (_req, file, cb) => {
+    const safeName = file.originalname.replace(/\s+/g, "_");
+    cb(null, `wed-${Date.now()}_${safeName}`);
+  },
+});
+
+const upload_receipt = multer({ storage_receipt });
+
+
 /**
  * POST /api/receipts/upload
  */
@@ -99,5 +114,76 @@ router.post(
     }
   }
 );
+
+
+router.post(
+  "/upload-wed-receipt",
+  upload_receipt.single("file"),
+  async (req, res) => {
+    const transaction = await sequelize.transaction();
+
+    try {
+      const { email } = req.body;
+      const file = req.file;
+
+      if (!email || !file) {
+        return res.status(400).json({
+          message: "Email and file are required",
+        });
+      }
+
+      // 1️⃣ Create receipt record
+      const receipt = await Receipt.create(
+        {
+          email,
+          file_name: file.filename,
+          original_name: file.originalname,
+          file_path: file.path,
+          status: "pending",
+        },
+        { transaction }
+      );
+
+      // 2️⃣ Queue email job
+      await receiptQueue.add(
+        "send-receipt",
+        {
+          receiptId: receipt.id,
+          email: receipt.email,
+          filePath: receipt.file_path,
+          originalName: receipt.original_name,
+        },
+        {
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        }
+      );
+
+      await transaction.commit();
+
+      res.status(201).json({
+        message: "WED Receipt uploaded and queued successfully",
+        receiptId: receipt.id,
+      });
+    } catch (error) {
+      await transaction.rollback();
+
+      // Cleanup file if DB fails
+      if (req.file?.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      // console.error("Receipt upload failed:", error);
+      res.status(500).json({
+        message: "Failed to upload receipt",
+      });
+    }
+  }
+);
+
+
+
 
 export default router;
