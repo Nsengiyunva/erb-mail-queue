@@ -3,13 +3,12 @@ import fs from 'fs/promises';
 import path from 'path';
 import multer from 'multer';
 import emailQueue from '../queues/email_queues.js';
-// import fileProcessQueue from '../queues/file_process_queue.js';
 
 const router = express.Router();
 
 const SOURCE_DIR = '/var/ugpass/source';
 
-// Ensure source directory exists
+
 fs.mkdir(SOURCE_DIR, { recursive: true })
   .then(() => console.log(`SOURCE_DIR ready: ${SOURCE_DIR}`))
   .catch(err => console.error('Failed to create SOURCE_DIR:', err));

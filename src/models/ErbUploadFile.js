@@ -19,6 +19,22 @@ export default (sequelize, DataTypes) => {
           type: DataTypes.STRING,
           allowNull: false,
         },
+        file_type: {
+          type: DataTypes.STRING,
+          allowNull: true,
+        },
+        email_address: {
+          type: DataTypes.STRING,
+          allowNull: true,
+        },
+        user_id: {
+          type: DataTypes.INTEGER,
+          allowNull: true,
+        },
+        file_size: {
+          type: DataTypes.BIGINT,
+          allowNull: true,
+        },
       },
       {
         tableName: "erb_upload_files",

@@ -1,51 +1,3 @@
-
-// import express from "express";
-// import * as dotenv from 'dotenv'
-// import emailRoutes from './routes/email_routes.js'
-// import fileRoutes from './routes/file_routes.js'
-
-// import monitorRoutes from './routes/monitor_routes.js';
-
-// import './workers/email_workers.js'
-// import './workers/file_worker.js'
-// import './workers/file_process_worker.js';
-// import './workers/file_monitor_worker.js';
-
-// import listEndpoints from 'express-list-endpoints';
-
-// import cors from 'cors'
-
-// import { connectDB } from "./config/database.js";
-
-// dotenv.config();
-
-// connectDB();
-
-// const app = express();
-// const PORT = 8782;
-   
-// app.use(express.json());
-
-// app.use( cors() );
-
-// app.use(function (_, res, next) {
-//   res.header("Access-Control-Allow-Origin", "*"); 
-//   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-//   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-//   res.header("Access-Control-Allow-Credentials", "true");
-//   next();
-// });
-
-
-// console.log("here-1",listEndpoints(app));
-
-// app.use('/api/erb/email', emailRoutes);
-// app.use('/api/erb/file', fileRoutes);
-
-// // app.use('/test/erb/', monitorRoutes);
-
-// app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
 import express from "express";
 import * as dotenv from "dotenv";
 import cors from "cors";
@@ -55,6 +7,7 @@ import emailRoutes from "./routes/email_routes.js";
 import fileRoutes from "./routes/file_routes.js";
 import monitorRoutes from "./routes/monitor_routes.js";
 import receiptRoutes from "./routes/receipt_routes.js";
+import reportRoutes from "./routes/report_routes.js";
 
 // Workers
 import "./workers/email_workers.js";
@@ -62,6 +15,7 @@ import "./workers/file_worker.js";
 import "./workers/file_process_worker.js";
 import "./workers/file_monitor_worker.js";
 import "./workers/receipt_worker.js"
+import "./workers/report_worker.js"
 
 dotenv.config();
 
@@ -110,6 +64,7 @@ app.use("/api/erb/email", emailRoutes);
 app.use("/api/erb/file", fileRoutes);
 app.use("/api/erb/monitor", monitorRoutes);
 app.use("/api/erb/receipt", receiptRoutes);
+app.use("/api/erb/report", reportRoutes);
 
 // Test route
 app.get("/api/test", (_, res) => res.json({ ok: true }));
@@ -123,52 +78,3 @@ app.use((_, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
-
-
-
-// import express from 'express';
-// import http from 'http';
-// import { Server } from 'socket.io';
-// import { Queue } from 'bullmq';
-// import cors from 'cors';
-// import connection from './redis.js';
-
-// import './workers/socket_worker.js'
-
-// const app = express();
-// const PORT = process.env.PORT || 8782;
-
-// app.use(cors({
-//   origin: "*",
-//   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-//   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-// }));
-// app.use(express.json());
-
-// const server = http.createServer(app);
-// const io = new Server(server, { cors: { origin: '*' } });
-
-// /* BullMQ Queue */
-// export const jobQueue = new Queue('file-processing', { connection });
-
-// /* WebSocket */
-// io.on('connection', (socket) => {
-//   console.log('Client connected:', socket.id);
-
-//   socket.on('join-job', (jobId) => {
-//     socket.join(`job:${jobId}`);
-//   });
-// });
-
-// /* REST – create job */
-// app.post('/api/process', async (req, res) => {
-//   const job = await jobQueue.add('process-file', {
-//     fileId: '12345',
-//   });
-
-//   res.json({ jobId: job.id });
-// });
-
-// server.listen(  PORT  , () => {
-//   console.log(`API + WS running on port ${PORT}`);
-// });

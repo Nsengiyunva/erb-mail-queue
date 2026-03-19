@@ -144,6 +144,29 @@ module.exports = {
       error_file: "./logs/file-monitor-worker-error.log",
       out_file: "./logs/file-monitor-worker-out.log",
       autorestart: true
+    },
+
+    {
+      name: "erb-file-report-worker",
+      script: "./src/workers/report_worker.js",
+      instances: 2,
+      exec_mode: "fork",
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+
+        REDIS_HOST: "127.0.0.1",
+        REDIS_PORT: 6379,
+
+        DB_HOST: "localhost",
+        DB_NAME: "erbdb",
+        DB_USER: "erbadmin",
+        DB_PASS: process.env.DB_PASS
+      },
+      log_file: "./logs/file-monitor-worker.log",
+      error_file: "./logs/file-monitor-worker-error.log",
+      out_file: "./logs/file-monitor-worker-out.log",
+      autorestart: true
     }
   ]
 };
