@@ -6,7 +6,7 @@ import { sequelize } from "../config/database.js";
 import ErbUploadFileModel from "../models/ErbUploadFile.js";
 import { DataTypes } from "sequelize";
 
-const FILE_DIR = process.env.FILE_DIR || "/home/user1/ERB/uploads";
+const FILE_DIR = "/home/user1/ERB/uploads";
 
 // Ensure directory exists
 if (!fs.existsSync(FILE_DIR)) {
