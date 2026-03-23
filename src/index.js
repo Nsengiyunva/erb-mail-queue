@@ -30,13 +30,31 @@ app.set("trust proxy", true);
 // --------------------
 // ✅ CORS (MUST BE FIRST)
 // --------------------
-
 app.use(cors({
   origin: ["http://localhost:3000", "https://registration.erb.go.ug"],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
 }));
+
+
+//here
+app.use((req, res, next) => {
+  // ✅ Always allow preflight
+  if (req.method === "OPTIONS") {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    return res.sendStatus(204);
+  }
+
+  // ✅ Redirect only real requests
+  if (req.protocol === "http") {
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  }
+
+  next();
+});
 
 
 // --------------------
