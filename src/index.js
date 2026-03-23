@@ -109,7 +109,7 @@ import "./workers/application_worker.js";
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 8754;
+const PORT =  8854;
 
 // Trust proxy (NGINX)
 app.set("trust proxy", true);
