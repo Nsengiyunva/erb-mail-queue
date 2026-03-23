@@ -30,13 +30,15 @@ app.set("trust proxy", true);
 // --------------------
 // ✅ CORS (MUST BE FIRST)
 // --------------------
-const allowedOrigins = [
-  "http://localhost:3000",
-  "https://registration.erb.go.ug"
-];
-
-app.use(cors({
+// CORS FIRST
+// CORS FIRST
+const corsOptions = {
   origin: function (origin, callback) {
+    const allowedOrigins = [
+      "http://localhost:3000",
+      "https://registration.erb.go.ug"
+    ];
+
     if (!origin) return callback(null, true);
 
     if (allowedOrigins.includes(origin)) {
@@ -46,27 +48,20 @@ app.use(cors({
     }
   },
   credentials: true,
-}));
+};
 
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
-// --------------------
 // Body parsers
-// --------------------
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --------------------
-// 🔐 HTTPS redirect (NOT for OPTIONS)
-// --------------------
+// HTTPS redirect
 app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
   if (req.protocol === "http") {
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
   }
-
   next();
 });
 
