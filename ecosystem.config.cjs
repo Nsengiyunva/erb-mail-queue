@@ -11,7 +11,7 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: "production",
-        PORT: 8782,
+        PORT: 8854,
 
         /* SMTP */
         SMTP_HOST: "relay.umcs.go.ug",
@@ -51,7 +51,6 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: "production",
-
         SMTP_HOST: "relay.umcs.go.ug",
         SMTP_PORT: 587,
         SMTP_USER: "licenses@erb.go.ug",

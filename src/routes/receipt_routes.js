@@ -220,7 +220,7 @@ const corsOptions = {
 };
 
 router.use(cors(corsOptions));
-router.options("*", cors(corsOptions)); // handle preflight at router level
+router.options(/.*/, cors(corsOptions));// handle preflight at router level
 
 // --------------------
 // Multer configs
