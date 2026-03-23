@@ -4,7 +4,7 @@ module.exports = {
        API SERVER
     ========================== */
     {
-      name: "erb-api",
+      name: "erb-mail-api",
       script: "./src/index.js",
       instances: 1,
       exec_mode: "fork",
