@@ -31,12 +31,12 @@ app.set("trust proxy", true);
 // ✅ CORS (MUST BE FIRST)
 // --------------------
 
-// app.use(cors({
-//   origin: "*",
-//   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-//   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-// }));
-app.use( cors() )
+app.use(cors({
+  origin: ["http://localhost:3000", "https://registration.erb.go.ug"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true,
+}));
 
 
 // --------------------
