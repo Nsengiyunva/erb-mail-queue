@@ -158,12 +158,20 @@ app.use((req, res, next) => {
 // --------------------
 // Routes
 // --------------------
+app.get("/api/erb/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    service: "erb-api",
+    timestamp: new Date().toISOString(),
+  });
+});
 app.use("/api/erb/email", emailRoutes);
 app.use("/api/erb/file", fileRoutes);
 app.use("/api/erb/monitor", monitorRoutes);
 app.use("/api/erb/receipt", receiptRoutes);
 app.use("/api/erb/report", reportRoutes);
 app.use("/api/erb/application", applicationRoutes);
+
 
 // 404 fallback
 app.use((_, res) => {
