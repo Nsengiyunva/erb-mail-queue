@@ -3,7 +3,7 @@ import Sequelize from 'sequelize';
 import FileBatch from './FileBatch.js';
 import ProcessedFile from './ProcessedFile.js';
 import EmailLogModel from './EmailLog.js';
-import Application from './Application'
+import Application from './Application.js'
 import { sequelize } from '../config/database.js';
 
 // Initialize EmailLog properly

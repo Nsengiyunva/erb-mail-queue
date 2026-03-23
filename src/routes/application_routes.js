@@ -10,7 +10,7 @@ const Application = ApplicationModel(sequelize, DataTypes);
 /**
  * POST /api/applications/submit
  */
-router.post("/submit", async (req, res) => {
+router.post("/submit-application", async (req, res) => {
   const transaction = await sequelize.transaction();
 
   try {
