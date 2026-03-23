@@ -46,7 +46,6 @@ router.post("/submit", async (req, res) => {
       application = await Application.create(
         {
           ...payload,
-          applicationID,
           status: "PENDING",
         },
         { transaction }
