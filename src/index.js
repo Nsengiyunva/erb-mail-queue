@@ -104,7 +104,7 @@ import "./workers/file_process_worker.js";
 import "./workers/file_monitor_worker.js";
 import "./workers/receipt_worker.js";
 import "./workers/report_worker.js";
-import "./workers/application_worker.js";
+import "./workers/appliication_worker.js";
 
 dotenv.config();
 
