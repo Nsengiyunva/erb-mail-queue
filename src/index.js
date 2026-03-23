@@ -80,9 +80,6 @@ app.use("/api/erb/receipt", receiptRoutes);
 app.use("/api/erb/report", reportRoutes);
 app.use("/api/erb/application", applicationRoutes);
 
-//route
-// app.get("/api/test", (_, res) => res.json({ ok: true }));
-
 // 404 fallback
 app.use((_, res) => {
   res.status(404).json({ error: "Endpoint not found" });
