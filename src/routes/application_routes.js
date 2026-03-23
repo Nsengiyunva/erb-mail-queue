@@ -24,7 +24,7 @@ router.post("/submit", async (req, res) => {
 
     if (!applicant_id || !email_address) {
       return res.status(400).json({
-        message: "applicant_id and email_address are required",
+        message: "Applicant ID and Email Address are both required",
       });
     }
 
