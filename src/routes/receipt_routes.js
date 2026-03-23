@@ -117,7 +117,7 @@ router.post(
 
 
 router.post(
-  "/upload-wed-receipt",
+  "/upload-receipt",
   upload_receipt.single("file"),
   async (req, res) => {
     const transaction = await sequelize.transaction();
