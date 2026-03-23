@@ -2,7 +2,7 @@ import express from "express";
 import { sequelize } from "../config/database.js";
 import { DataTypes } from "sequelize";
 import ApplicationModel from "../models/Application.js";
-import applicationQueue from "../queues/applicationQueue.js";
+import applicationQueue from "../queues/application_queue.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
