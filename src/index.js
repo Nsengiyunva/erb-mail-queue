@@ -179,21 +179,11 @@ app.use((_, res) => {
   res.status(404).json({ error: "Endpoint not found" });
 });
 
-//start the server 
-sequelize.sync({ alter: false }).then(() => {
-  console.log('✅ Database synced');
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`✅ Server running on port ${PORT}`);
-  });
-}).catch(err => {
-  console.error('❌ Database sync failed:', err);
-  process.exit(1);
-});
 
 // Start server
-// app.listen(PORT, "0.0.0.0", () => {
-//   console.log(`✅ Server running on port ${PORT}`);
-// });
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
 
 
 
