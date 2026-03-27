@@ -11,83 +11,83 @@ const Application = ApplicationModel(sequelize, DataTypes);
  * POST /api/applications/submit
  */
 router.post("/submit-application", async (req, res) => {
-  const transaction = await sequelize.transaction();
+  // const transaction = await sequelize.transaction();
 
-  try {
-    const payload = req.body;
+  try { 
+  //   const payload = req.body;
 
-    const {
-      applicant_id,
-      email_address,
-      applicationID
-    } = payload;
+  //   const {
+  //     applicant_id,
+  //     email_address,
+  //     applicationID
+  //   } = payload;
 
-    if (!applicant_id || !email_address) {
-      return res.status(400).json({
-        message: "Applicant ID and Email Address are both required",
-      });
-    }
+  //   if (!applicant_id || !email_address) {
+  //     return res.status(400).json({
+  //       message: "Applicant ID and Email Address are both required",
+  //     });
+  //   }
 
-    /**
-     * 1️⃣ Create or reuse application (IDEMPOTENT)
-     */
-    let application;
+  //   /**
+  //    * 1️⃣ Create or reuse application (IDEMPOTENT)
+  //    */
+  //   let application;
 
-    const whereClause = applicationID ? { id: applicationID }  : { applicant_id };
+  //   const whereClause = applicationID ? { id: applicationID }  : { applicant_id };
 
-    application = await Application.findOne({
-      where: whereClause,
-      transaction
-    });
+  //   application = await Application.findOne({
+  //     where: whereClause,
+  //     transaction
+  //   });
 
 
-    //the switch leg-work
-    if (!application) {
-      application = await Application.create(
-        {
-          ...payload,
-          status: "PENDING",
-        },
-        { transaction }
-      );
-    } else {
-      // Optional: update draft data before queue
-      await application.update(
-        {
-          ...payload,
-          status: "PENDING",
-        },
-        { transaction }
-      );
-    }
+  //   //the switch leg-work
+  //   if (!application) {
+  //     application = await Application.create(
+  //       {
+  //         ...payload,
+  //         status: "PENDING",
+  //       },
+  //       { transaction }
+  //     );
+  //   } else {
+  //     // Optional: update draft data before queue
+  //     await application.update(
+  //       {
+  //         ...payload,
+  //         status: "PENDING",
+  //       },
+  //       { transaction }
+  //     );
+  //   }
 
-    /**
-     * 2️⃣ Queue processing job
-     */
-    await applicationQueue.add(
-      "process-application",
-      {
-        ...payload,
-        applicationID: application.applicationID || application.id,
-        dbId: application.id, // 🔥 important for worker reference
-      },
-      {
-        attempts: 3,
-        backoff: { type: "exponential", delay: 5000 },
-        removeOnComplete: true,
-        removeOnFail: false,
-      }
-    );
+  //   /**
+  //    * 2️⃣ Queue processing job
+  //    */
+  //   await applicationQueue.add(
+  //     "process-application",
+  //     {
+  //       ...payload,
+  //       applicationID: application.applicationID || application.id,
+  //       dbId: application.id, // 🔥 important for worker reference
+  //     },
+  //     {
+  //       attempts: 3,
+  //       backoff: { type: "exponential", delay: 5000 },
+  //       removeOnComplete: true,
+  //       removeOnFail: false,
+  //     }
+  //   );
 
-    await transaction.commit();
+  //   await transaction.commit();
 
     res.status(201).json({
       message: "Application submitted and queued successfully",
-      applicationId: application.id,
+      applicationId: req.body.payload
     });
 
   } catch (error) {
-    await transaction.rollback();
+    // await transaction.rollback();
 
     console.error("Application submission failed:", error);
 
