@@ -67,6 +67,14 @@ app.use((req, res, next) => {
   next();
 });
 
+
+app.use((req, res, next) => {
+  if (req.headers['x-forwarded-proto'] === 'http') {  // ← only redirect when coming through nginx
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  }
+  next();
+});
+
 // --------------------
 // Routes
 // --------------------
