@@ -88,6 +88,7 @@
 import express from "express";
 import * as dotenv from "dotenv";
 import cors from "cors";
+import { sequelize } from './models/index.js';
 
 // Routes
 import emailRoutes from "./routes/email_routes.js";
@@ -178,10 +179,21 @@ app.use((_, res) => {
   res.status(404).json({ error: "Endpoint not found" });
 });
 
-// Start server
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server running on port ${PORT}`);
+//start the server 
+sequelize.sync({ alter: false }).then(() => {
+  console.log('✅ Database synced');
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`✅ Server running on port ${PORT}`);
+  });
+}).catch(err => {
+  console.error('❌ Database sync failed:', err);
+  process.exit(1);
 });
+
+// Start server
+// app.listen(PORT, "0.0.0.0", () => {
+//   console.log(`✅ Server running on port ${PORT}`);
+// });
 
 
 
