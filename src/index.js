@@ -85,6 +85,16 @@
 //   console.log(`✅ Server running on port ${PORT}`);
 // });
 
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+
+
 import express from "express";
 import * as dotenv from "dotenv";
 import cors from "cors";
