@@ -33,15 +33,15 @@ router.post("/submit-application", async (req, res) => {
      */
     let application;
 
-    const whereClause = applicationID
-      ? { applicationID }
-      : { applicant_id };
+    const whereClause = applicationID ? { id: applicationID }  : { applicant_id };
 
     application = await Application.findOne({
       where: whereClause,
       transaction
     });
 
+
+    //the switch leg-work
     if (!application) {
       application = await Application.create(
         {

@@ -1,13 +1,12 @@
-// models/Application.js
-// import { DataTypes } from "sequelize";
-// import { sequelize } from "../config/database.js";
-
 export default (sequelize, DataTypes) => {
     return sequelize.define(
       'Application',
       {
-        id: { type: DataTypes.BIGINT, primaryKey: true, autoIncrement: true },
-
+        id: { 
+          type: DataTypes.BIGINT, 
+          primaryKey: true, 
+          autoIncrement: true 
+        },
         applicant_id: DataTypes.INTEGER,
         name: DataTypes.STRING,
         first_name: DataTypes.STRING,
