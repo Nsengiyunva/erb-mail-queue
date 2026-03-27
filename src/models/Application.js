@@ -36,6 +36,12 @@ export default (sequelize, DataTypes) => {
         ever_convicted: DataTypes.STRING,
         conviction_details: DataTypes.TEXT,
 
+        education: DataTypes.TEXT,
+        engineering: DataTypes.TEXT,
+        education: DataTypes.TEXT,
+        membership: DataTypes.TEXT,
+        training: DataTypes.TEXT,
+
         status: {
             type: DataTypes.STRING,
             defaultValue: "PENDING",
