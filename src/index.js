@@ -104,7 +104,7 @@ import "./workers/file_process_worker.js";
 import "./workers/file_monitor_worker.js";
 import "./workers/receipt_worker.js";
 import "./workers/report_worker.js";
-import "./workers/appliication_worker.js";
+import "./workers/application_worker.js";
 
 dotenv.config();
 
@@ -141,8 +141,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // Handle preflight globally
-// app.options("*", cors(corsOptions));
-app.options("/*", cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 // Body parsers
 app.use(express.json());
@@ -166,6 +165,7 @@ app.get("/api/erb/health", (req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
 app.use("/api/erb/email", emailRoutes);
 app.use("/api/erb/file", fileRoutes);
 app.use("/api/erb/monitor", monitorRoutes);
@@ -183,6 +183,9 @@ app.use((_, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
+
+
 
 
 
