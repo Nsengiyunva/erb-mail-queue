@@ -140,8 +140,7 @@ const corsOptions = {
 // Apply CORS globally
 app.use(cors(corsOptions));
 
-// Handle preflight globally
-app.options("*", cors(corsOptions));
+app.options("/{*path}", cors(corsOptions));
 
 // Body parsers
 app.use(express.json());
