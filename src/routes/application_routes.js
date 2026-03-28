@@ -204,5 +204,37 @@ router.post(
 );
 
 
+// fetch draft
+/**
+ * GET /api/applications/draft/:applicant_id
+ */
+router.get("/draft/:applicant_id", async (req, res) => {
+  try {
+    const { applicant_id } = req.params;
+
+    if (!applicant_id) {
+      return res.status(400).json({ message: "Applicant ID is required" });
+    }
+
+    const application = await Application.findOne({
+      where: { applicant_id },
+    });
+
+    if (!application) {
+      return res.status(404).json({ message: "No application found for this applicant" });
+    }
+
+    res.status(200).json({
+      message: "Draft fetched successfully",
+      application,
+    });
+
+  } catch (error) {
+    console.error("Failed to fetch draft:", error);
+    res.status(500).json({ message: "Failed to fetch draft" });
+  }
+});
+
+
 
 export default router;
