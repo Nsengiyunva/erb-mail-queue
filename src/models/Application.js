@@ -44,9 +44,6 @@ export default (sequelize, DataTypes) => {
         positions: DataTypes.TEXT,
         sponsors: DataTypes.TEXT,
 
-        techinical_report: DataTypes.TEXT,
-        career_report: DataTypes.TEXT,
-
         technical_path:  DataTypes.STRING,
         career_path:  DataTypes.STRING,
 
