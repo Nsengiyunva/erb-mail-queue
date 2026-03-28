@@ -41,6 +41,14 @@ export default (sequelize, DataTypes) => {
         education: DataTypes.TEXT,
         membership: DataTypes.TEXT,
         training: DataTypes.TEXT,
+        positions: DataTypes.TEXT,
+        sponsors: DataTypes.TEXT,
+
+        techinical_report: DataTypes.TEXT,
+        career_report: DataTypes.TEXT,
+
+        technical_path:  DataTypes.STRING,
+        career_path:  DataTypes.STRING,
 
         status: {
             type: DataTypes.STRING,
