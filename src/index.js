@@ -11,13 +11,13 @@ import reportRoutes from "./routes/report_routes.js";
 import applicationRoutes from './routes/application_routes.js'
 
 // Workers
-// import "./workers/email_workers.js";
-// import "./workers/file_worker.js";
-// import "./workers/file_process_worker.js";
-// import "./workers/file_monitor_worker.js";
-// import "./workers/receipt_worker.js";
-// import "./workers/report_worker.js";
-// import "./workers/application_worker.js";
+import "./workers/email_workers.js";
+import "./workers/file_worker.js";
+import "./workers/file_process_worker.js";
+import "./workers/file_monitor_worker.js";
+import "./workers/receipt_worker.js";
+import "./workers/report_worker.js";
+import "./workers/application_worker.js";
 
 dotenv.config();
 
