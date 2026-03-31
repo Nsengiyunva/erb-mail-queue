@@ -8,6 +8,7 @@ export default (sequelize, DataTypes) => {
           autoIncrement: true 
         },
         applicant_id: DataTypes.INTEGER,
+        draft_type: DataTypes.STRING,
         name: DataTypes.STRING,
         first_name: DataTypes.STRING,
         surname: DataTypes.STRING,
