@@ -134,16 +134,76 @@ router.post("/submit-application", async (req, res) => {
 })
 
 
+// router.post(
+//   "/engineer_documents",
+//   upload.single("document"), // single file under the key "document"
+//   async (req, res) => {
+//     try {
+//       const { applicationID, file_title } = req.body;
+
+//       // ── Validate inputs ───────────────────────────────────────────────────
+//       if (!applicationID) {
+//         req.file && fs.unlink(req.file.path, () => {});
+//         return res.status(400).json({ message: "applicationID is required" });
+//       }
+
+//       if (!req.file) {
+//         return res.status(400).json({ message: "No file was uploaded" });
+//       }
+
+//       // ── Find the application ──────────────────────────────────────────────
+//       const application = await Application.findOne({
+//         where: { id: applicationID },
+//       });
+
+//       if (!application) {
+//         fs.unlink(req.file.path, () => {});
+//         return res.status(404).json({ message: "Application not found" });
+//       }
+
+//       const filePath = path
+//         .relative(process.cwd(), req.file.path)
+//         .replace(/\\/g, "/");
+
+//       const TITLE_COLUMN_MAP = {
+//         "technical report": "technical_path",
+//         "career report":    "career_path",
+//       };
+
+//       const column = TITLE_COLUMN_MAP[file_title?.toLowerCase().trim()];
+
+//       if (!column) {
+//         fs.unlink(req.file.path, () => {});
+//         return res.status(400).json({
+//           message: `Invalid file_title. Accepted values: ${Object.keys(TITLE_COLUMN_MAP).join(", ")}`,
+//         });
+//       }
+
+//       await application.update({ [column]: filePath });
+
+//       res.status(200).json({
+//         message: "Document uploaded successfully",
+//         filePath,
+//         allFilePaths: [...existing, filePath],
+//       });
+//     } catch (error) {
+//       req.file && fs.unlink(req.file.path, () => {});
+//       console.error("Document upload failed:", error);
+//       res.status(500).json({ message: "Failed to upload document" });
+//     }
+//   }
+// )
+
 router.post(
   "/engineer_documents",
-  upload.single("document"), // single file under the key "document"
+  upload.single("document"),
   async (req, res) => {
     try {
       const { applicationID, file_title } = req.body;
 
-      // ── Validate inputs ───────────────────────────────────────────────────
+      // ── Validate inputs ─────────────────────────────────────────────
       if (!applicationID) {
-        req.file && fs.unlink(req.file.path, () => {});
+        if (req.file) fs.unlink(req.file.path, () => {});
         return res.status(400).json({ message: "applicationID is required" });
       }
 
@@ -151,9 +211,14 @@ router.post(
         return res.status(400).json({ message: "No file was uploaded" });
       }
 
-      // ── Find the application ──────────────────────────────────────────────
+      if (!file_title) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ message: "file_title is required" });
+      }
+
+      // ── Find the application ────────────────────────────────────────
       const application = await Application.findOne({
-        where: { id: applicationID },
+        where: { id: Number(applicationID) }, // ensure correct type
       });
 
       if (!application) {
@@ -161,27 +226,19 @@ router.post(
         return res.status(404).json({ message: "Application not found" });
       }
 
-      // ── Append the new file path to existing ones ─────────────────────────
-      // const filePath = path
-      //   .relative(process.cwd(), req.file.path)
-      //   .replace(/\\/g, "/");
-
-      // const existing = application.file_paths ?? [];
-
-      // await application.update({
-      //   file_paths: [...existing, filePath],
-      // });
-
+      // ── Normalize file path ─────────────────────────────────────────
       const filePath = path
         .relative(process.cwd(), req.file.path)
         .replace(/\\/g, "/");
 
+      // ── Map file title to DB column ─────────────────────────────────
       const TITLE_COLUMN_MAP = {
         "technical report": "technical_path",
-        "career report":    "career_path",
+        "career report": "career_path",
       };
 
-      const column = TITLE_COLUMN_MAP[file_title?.toLowerCase().trim()];
+      const normalizedTitle = file_title.toLowerCase().trim();
+      const column = TITLE_COLUMN_MAP[normalizedTitle];
 
       if (!column) {
         fs.unlink(req.file.path, () => {});
@@ -190,20 +247,28 @@ router.post(
         });
       }
 
+      // ── Update application ──────────────────────────────────────────
       await application.update({ [column]: filePath });
 
-      res.status(200).json({
+      // ── Success response ────────────────────────────────────────────
+      return res.status(200).json({
         message: "Document uploaded successfully",
         filePath,
-        allFilePaths: [...existing, filePath],
+        columnUpdated: column,
       });
+
     } catch (error) {
-      req.file && fs.unlink(req.file.path, () => {});
+      // Clean up uploaded file on failure
+      if (req.file) fs.unlink(req.file.path, () => {});
+
       console.error("Document upload failed:", error);
-      res.status(500).json({ message: "Failed to upload document" });
+
+      return res.status(500).json({
+        message: error.message || "Failed to upload document",
+      });
     }
   }
-)
+);
 
 
 router.get("/draft/:applicant_id", async (req, res) => {
