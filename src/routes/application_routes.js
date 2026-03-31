@@ -206,10 +206,6 @@ router.post(
 );
 
 
-// fetch draft
-/**
- * GET /api/applications/draft/:applicant_id
- */
 router.get("/draft/:applicant_id", async (req, res) => {
   try {
     const { applicant_id } = req.params;
@@ -219,7 +215,7 @@ router.get("/draft/:applicant_id", async (req, res) => {
     }
 
     const application = await Application.findOne({
-      where: { applicant_id },
+      where: { applicant_id: Number(applicant_id) }
     });
 
     if (!application) {
