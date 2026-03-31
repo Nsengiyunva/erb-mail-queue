@@ -131,7 +131,7 @@ router.post("/submit-application", async (req, res) => {
       message: "Failed to submit application",
     });
   }
-});
+})
 
 
 router.post(
@@ -203,7 +203,7 @@ router.post(
       res.status(500).json({ message: "Failed to upload document" });
     }
   }
-);
+)
 
 
 router.get("/draft/:applicant_id", async (req, res) => {
@@ -216,7 +216,7 @@ router.get("/draft/:applicant_id", async (req, res) => {
 
     const application = await Application.findOne({
       where: { applicant_id: Number(applicant_id) }
-    });
+    })
 
     if (!application) {
       return res.status(404).json({ message: "No application found for this applicant" });
@@ -231,7 +231,7 @@ router.get("/draft/:applicant_id", async (req, res) => {
     console.error("Failed to fetch draft:", error);
     res.status(500).json({ message: "Failed to fetch draft" });
   }
-});
+})
 
 
 
