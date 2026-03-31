@@ -1,5 +1,6 @@
 import express from "express";
 import fs from "fs";
+import path from 'path'
 import { sequelize } from "../config/database.js";
 import { DataTypes } from "sequelize";
 import ApplicationModel from "../models/Application.js";
