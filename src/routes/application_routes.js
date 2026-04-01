@@ -209,6 +209,61 @@ router.post(
   }
 );
 
+router.get("/get_application_files/:applicationID", async (req, res) => {
+  try {
+    const { applicationID } = req.params;
+
+    if (!applicationID) {
+      return res.status(400).json({
+        message: "Application ID is required",
+      });
+    }
+
+    const application = await Application.findOne({
+      where: { id: applicationID },
+      attributes: ["id", "applicant_id", "technical_path", "career_path"],
+    });
+
+    if (!application) {
+      return res.status(404).json({
+        message: "Application not found",
+      });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+    const buildFileEntry = (filePath, tag) => {
+      if (!filePath) return null;
+
+      const fileName = filePath.split("/").pop(); // e.g. "1775044680791-1638_Receipt.pdf"
+
+      return {
+        _id:      `${applicationID}_${tag}`,
+        name:     fileName,
+        tag:      tag,
+        filePath: filePath.replace(/^\.\.\/\.\.\//, ""), // strip leading ../../ for URL use
+      };
+    };
+
+    const files = [
+      buildFileEntry(application.technical_path, "technical"),
+      buildFileEntry(application.career_path,    "career"),
+    ].filter(Boolean); // drop nulls for files not yet uploaded
+
+    res.status(200).json({
+      message: "Files fetched successfully",
+      files,
+    });
+
+  } catch (error) {
+    console.error("Failed to fetch application files:", error);
+
+    res.status(500).json({
+      message: "Failed to fetch application files",
+    });
+  }
+});
+
 
 router.get("/draft/:applicant_id", async (req, res) => {
   try {
