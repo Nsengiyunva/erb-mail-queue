@@ -6,7 +6,11 @@ Content-Type: application/json
 
 
 
-
+curl -s -X POST http://127.0.0.1:8854/api/erb/receipt/payment-update \
+  -H "Content-Type: application/json" \
+  -H "x-watcher-secret: bnNlbmdpeXVudmE6a2luZ0AjMjAyME5TRQ==" \
+  -d '{"request_id":"test123","status":"completed","amount":500}'
+# Expected: {"received":true}
 
 
 
