@@ -4,6 +4,28 @@
 GET  {{url}}/api/erb/health
 Content-Type: application/json
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ### Send PDFs
 POST {{url}}/api/erb/email/send-pdfs
 Content-Type: application/json
