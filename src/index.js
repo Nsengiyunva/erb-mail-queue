@@ -105,7 +105,7 @@ app.post('/api/erb/receipt/payment-update', (req, res) => {
 
   const { request_id, status, amount } = req.body
 
-  if (!transactionRef || !status) {
+  if (!request_id || !status) {
     return res.status(400).json({ message: 'transactionRef and status required' })
   }
 
@@ -120,7 +120,7 @@ app.post('/api/erb/receipt/payment-update', (req, res) => {
     updatedAt,
   })
 
-  console.log(`[erb-payment-update] Relayed ${request_id} → ${status} to browser clients`)
+  console.log(`[erb-stanbic-payment] Relayed ${request_id} → ${status} to browser clients`)
 })
 
 // --------------------
