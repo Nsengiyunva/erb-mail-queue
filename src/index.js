@@ -1,8 +1,7 @@
 import express from "express";
 import * as dotenv from "dotenv";
 import cors from "cors";
-import { createServer } from 'http'
-import { Server }       from 'socket.io'
+
 
 // Routes
 import emailRoutes from "./routes/email_routes.js";
@@ -68,60 +67,6 @@ app.use((req, res, next) => {
   }
   next();
 });
-
-//erb-payments-stanbic
-const WATCHER_SECRET = process.env.WATCHER_SECRET
-
-// ── WebSocket server ──────────────────────────────────────────────
-const httpServer = createServer(app)
-
-export const io = new Server(httpServer, {
-  cors: {
-    origin:      ['http://localhost:3000', 'https://registration.erb.go.ug'],
-    credentials: true,
-  },
-})
-
-// Rooms keyed by transactionRef — frontend joins on payment initiation
-io.on('connection', (socket) => {
-  socket.on('watch:payment', ({ request_id }) => {
-    if (transactionRef) {
-      socket.join(`payment:${request_id}`)
-      console.log(`[socket] Client watching payment:${request_id}`)
-    }
-  })
-  socket.on('disconnect', () => {
-    console.log('[socket] Client disconnected')
-  })
-})
-
-
-app.post('/api/erb/receipt/payment-update', (req, res) => {
-  const secret = req.headers['x-watcher-secret']
-
-  if (secret !== WATCHER_SECRET) {
-    return res.status(403).json({ message: 'Forbidden' })
-  }
-
-  const { request_id, status, amount } = req.body
-
-  if (!request_id || !status) {
-    return res.status(400).json({ message: 'transactionRef and status required' })
-  }
-
-  // Immediately ACK the watcher — don't make VM1 wait
-  res.status(200).json({ received: true })
-
-  // Push to any browser watching this transactionRef
-  io.to(`payment:${request_id}`).emit('payment:update', {
-    transactionRef,
-    status,
-    amount,
-    updatedAt,
-  })
-
-  console.log(`[erb-stanbic-payment] Relayed ${request_id} → ${status} to browser clients`)
-})
 
 // --------------------
 // Routes
