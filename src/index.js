@@ -182,7 +182,7 @@ app.use("/api/erb/application", applicationRoutes);
 
 // ── Payment-update webhook (called by VM1 payment watcher) ───────
 // Placed here so it has direct access to `io` without circular imports.
-const WATCHER_SECRET = process.env.WATCHER_SECRET;
+const WATCHER_SECRET = 'bnNlbmdpeXVudmE6a2luZ0AjMjAyME5TRQ==';
 
 app.post("/api/erb/receipt/payment-update", (req, res) => {
   const secret = req.headers["x-watcher-secret"];
