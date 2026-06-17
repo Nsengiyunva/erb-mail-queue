@@ -133,82 +133,6 @@ router.post("/submit-application", async (req, res) => {
   }
 })
 
-// router.post(
-//   "/engineer_documents",
-//   upload.single("document"),
-//   async (req, res) => {
-//     try {
-//       const { applicationID, file_title } = req.body;
-
-//       // ── Validate inputs ─────────────────────────────────────────────
-//       if (!applicationID) {
-//         if (req.file) fs.unlink(req.file.path, () => {});
-//         return res.status(400).json({ message: "applicationID is required" });
-//       }
-
-//       if (!req.file) {
-//         return res.status(400).json({ message: "No file was uploaded" });
-//       }
-
-//       if (!file_title) {
-//         fs.unlink(req.file.path, () => {});
-//         return res.status(400).json({ message: "file_title is required" });
-//       }
-
-//       // ── Find the application ────────────────────────────────────────
-//       const application = await Application.findOne({
-//         where: { id: Number(applicationID) }, // ensure correct type
-//       });
-
-//       if (!application) {
-//         fs.unlink(req.file.path, () => {});
-//         return res.status(404).json({ message: "Application not found" });
-//       }
-
-//       // ── Normalize file path ─────────────────────────────────────────
-//       const filePath = path
-//         .relative(process.cwd(), req.file.path)
-//         .replace(/\\/g, "/");
-
-//       // ── Map file title to DB column ─────────────────────────────────
-//       const TITLE_COLUMN_MAP = {
-//         "technical report": "technical_path",
-//         "career report": "career_path",
-//       };
-
-//       const normalizedTitle = file_title.toLowerCase().trim();
-//       const column = TITLE_COLUMN_MAP[normalizedTitle];
-
-//       if (!column) {
-//         fs.unlink(req.file.path, () => {});
-//         return res.status(400).json({
-//           message: `Invalid file_title. Accepted values: ${Object.keys(TITLE_COLUMN_MAP).join(", ")}`,
-//         });
-//       }
-
-//       // ── Update application ──────────────────────────────────────────
-//       await application.update({ [column]: filePath });
-
-//       // ── Success response ────────────────────────────────────────────
-//       return res.status(200).json({
-//         message: "Document uploaded successfully",
-//         filePath,
-//         columnUpdated: column,
-//       });
-
-//     } catch (error) {
-//       // Clean up uploaded file on failure
-//       if (req.file) fs.unlink(req.file.path, () => {});
-
-//       console.error("Document upload failed:", error);
-
-//       return res.status(500).json({
-//         message: error.message || "Failed to upload document",
-//       });
-//     }
-//   }
-// )
-
 router.post(
   "/engineer_documents",
   upload.single("document"),
@@ -356,15 +280,18 @@ router.get("/draft/:applicant_id", async (req, res) => {
     }
 
     const application = await Application.findOne({
-      where: { applicant_id: Number(applicant_id) }
-    })
+      where: { applicant_id: Number(applicant_id) },
+    });
 
     if (!application) {
-      return res.status(404).json({ message: "No application found for this applicant" });
+      return res.status(200).json({
+        message: "No application found for this applicant",
+        application: null,
+      });
     }
 
     res.status(200).json({
-      message: "Draft fetched successfully",
+      message: "Application fetched successfully",
       application,
     });
 
