@@ -27,7 +27,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 30 * 1024 * 1024 }, // 10 MB
+  limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB
   fileFilter: (_req, file, cb) => {
     const ALLOWED = [
       "application/pdf",
@@ -40,12 +40,9 @@ const upload = multer({
       ? cb(null, true)
       : cb(new Error(`File type not allowed: ${file.mimetype}`));
   },
-});
+})
 
 
-/**
- * POST /api/applications/submit
- */
 router.post("/submit-application", async (req, res) => {
   const transaction = await sequelize.transaction();
 
@@ -301,6 +298,55 @@ router.get("/draft/:applicant_id", async (req, res) => {
   }
 })
 
+
+router.get("/application/:applicant_id", async (req, res) => {
+  try {
+    const applicant_id = Number(req.params.applicant_id);
+
+    if (!applicant_id || isNaN(applicant_id)) {
+      return res.status(400).json({ message: "A valid applicant ID is required" });
+    }
+
+    const application = await Application.findOne({
+      where: { applicant_id },
+    });
+
+    if (!application) {
+      return res.status(404).json({
+        message: "No application found for this applicant",
+        application: null,
+      });
+    }
+
+    // Parse JSON columns so the frontend receives arrays, not strings
+    const raw = application.toJSON();
+
+    const parseCol = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      try { return JSON.parse(val); } catch { return []; }
+    };
+
+    const result = {
+      ...raw,
+      education:   parseCol(raw.education),
+      engineering: parseCol(raw.engineering),
+      training:    parseCol(raw.training),
+      positions:   parseCol(raw.positions),
+      membership:  parseCol(raw.membership),
+      sponsors:    parseCol(raw.sponsors),
+    };
+
+    return res.status(200).json({
+      message: "Application fetched successfully",
+      application: result,
+    });
+
+  } catch (error) {
+    console.error("Failed to fetch application:", error);
+    return res.status(500).json({ message: "Failed to fetch application" });
+  }
+});
 
 
 export default router;
