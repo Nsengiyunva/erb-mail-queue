@@ -298,7 +298,10 @@ router.get("/draft/:applicant_id", async (req, res) => {
   }
 })
 
-
+// ── GET /application/:applicant_id ──────────────────────────────
+// Returns the full application record for a given applicant.
+// Used by the frontend "View my application" flow to render
+// the submitted application detail view.
 router.get("/application/:applicant_id", async (req, res) => {
   try {
     const applicant_id = Number(req.params.applicant_id);
@@ -348,5 +351,39 @@ router.get("/application/:applicant_id", async (req, res) => {
   }
 });
 
+
+
+// ── GET /uploads/:filename ───────────────────────────────────────
+// Serves uploaded documents (PDFs, images) directly from disk.
+// The path stored in the DB is relative to cwd, e.g.
+//   "../../home/user1/uploads/1234567890-report.pdf"
+// The frontend hits /api/erb/uploads/:filename so we just resolve
+// the filename against UPLOADS_DIR.
+router.get("/uploads/:filename", (req, res) => {
+  const { filename } = req.params;
+
+  // Guard against path traversal
+  if (filename.includes("..") || filename.includes("/")) {
+    return res.status(400).json({ message: "Invalid filename" });
+  }
+
+  const filePath = path.join(UPLOADS_DIR, filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ message: "File not found" });
+  }
+
+  // Let the browser decide whether to display inline or download.
+  // PDFs open inline; other types trigger a download prompt.
+  const ext = path.extname(filename).toLowerCase();
+  const isPdf = ext === ".pdf";
+
+  res.setHeader(
+    "Content-Disposition",
+    isPdf ? `inline; filename="${filename}"` : `attachment; filename="${filename}"`
+  );
+
+  res.sendFile(filePath);
+});
 
 export default router;
