@@ -13,6 +13,7 @@ import monitorRoutes     from "./routes/monitor_routes.js";
 import receiptRoutes     from "./routes/receipt_routes.js";
 import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
+import invoiceRoutes     from "./routes/invoice_routes.js";
 
 import { PaymentTransaction } from "./controllers/receipt-controller.js";
 
@@ -24,6 +25,7 @@ import "./workers/file_monitor_worker.js";
 import "./workers/receipt_worker.js";
 import "./workers/report_worker.js";
 import "./workers/application_worker.js";
+import "./workers/invoice_worker.js";
 
 dotenv.config();
 
@@ -40,6 +42,9 @@ app.set("trust proxy", true);
 const allowedOrigins = [
   "http://localhost:3000",
   "https://registration.erb.go.ug",
+  "https://data.erb.go.ug",
+  "https://erb.go.ug",
+  "https://mis.nec.go.ug",
 ];
 
 const corsOptions = {
@@ -121,6 +126,7 @@ app.use("/api/erb/monitor",     monitorRoutes);
 app.use("/api/erb/receipt",     receiptRoutes);
 app.use("/api/erb/report",      reportRoutes);
 app.use("/api/erb/application", applicationRoutes);
+app.use("/api/erb/invoice",     invoiceRoutes);
 
 // ── Payment-update webhook (called by VM1 payment watcher) ───────
 // Placed here so it has direct access to `io` without circular imports.

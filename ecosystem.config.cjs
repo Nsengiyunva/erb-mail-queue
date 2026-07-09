@@ -145,6 +145,33 @@ module.exports = {
       autorestart: true
     },
 
+    /* =========================
+       INVOICE WORKER
+       (Emails generated fee invoice PDFs)
+    ========================== */
+    {
+      name: "erb-invoice-worker",
+      script: "./src/workers/invoice_worker.js",
+      instances: 1,
+      exec_mode: "fork",
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+
+        SMTP_HOST: "relay.umcs.go.ug",
+        SMTP_PORT: 587,
+        SMTP_USER: "licenses@erb.go.ug",
+        SMTP_PASS: "081IZCno7sEghbh2LwbfGVtB",
+
+        REDIS_HOST: "127.0.0.1",
+        REDIS_PORT: 6379
+      },
+      log_file: "./logs/invoice-worker.log",
+      error_file: "./logs/invoice-worker-error.log",
+      out_file: "./logs/invoice-worker-out.log",
+      autorestart: true
+    },
+
     {
       name: "erb-file-report-worker",
       script: "./src/workers/report_worker.js",
