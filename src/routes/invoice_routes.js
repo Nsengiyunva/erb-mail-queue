@@ -11,7 +11,6 @@ import invoiceQueue   from '../queues/invoice_queue.js'
 const router  = express.Router()
 const Invoice = InvoiceModel(sequelize, DataTypes)
 
-// Create the table if it doesn't exist yet (safe — won't drop existing data)
 Invoice.sync({ alter: false }).catch(err =>
   console.error('[Invoice] sync error:', err.message)
 )
