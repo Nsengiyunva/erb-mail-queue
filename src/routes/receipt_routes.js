@@ -22,6 +22,7 @@ if (!fs.existsSync(FILE_DIR)) {
 const corsOptions = {
   origin: ['http://localhost:3000', 'https://registration.erb.go.ug'],
   credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-user-role', 'x-applicant-id'],
 }
 
 router.use(cors(corsOptions))
