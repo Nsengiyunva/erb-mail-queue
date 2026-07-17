@@ -547,8 +547,20 @@ router.post(
 
       // ── Map file title to DB column (early — avoids wasted DB call) ─
       const TITLE_COLUMN_MAP = {
-        "technical report": "technical_path",
-        "career report":    "career_path",
+        "technical report":              "technical_path",
+        "career report":                 "career_path",
+        "uipe membership letter":        "uipe_membership_letter_path",
+        "uipe membership certificate":   "uipe_membership_certificate_path",
+        "academic certificates":         "academic_certificates_path",
+        "academic transcripts":          "transcripts_path",
+        "uneb certificates":             "uneb_certificates_path",
+        "verification letter":           "verification_letters_path",
+        "other qualifications":          "other_qualifications_path",
+        "employment letter":             "employment_letters_path",
+        "organogram":                    "organogram_path",
+        "cpd records":                   "cpd_path",
+        "passport photograph 1":         "passport_photo_1_path",
+        "passport photograph 2":         "passport_photo_2_path",
       };
 
       const normalizedTitle = file_title.toLowerCase().trim();
@@ -616,7 +628,17 @@ router.get("/get_application_files/:applicationID", async (req, res) => {
 
     const application = await Application.findOne({
       where: { id: applicationID },
-      attributes: ["id", "applicant_id", "technical_path", "career_path"],
+      attributes: [
+        "id", "applicant_id",
+        "technical_path", "career_path",
+        "uipe_membership_letter_path", "uipe_membership_certificate_path",
+        "academic_certificates_path", "transcripts_path",
+        "uneb_certificates_path", "verification_letters_path",
+        "other_qualifications_path",
+        "employment_letters_path", "organogram_path",
+        "cpd_path",
+        "passport_photo_1_path", "passport_photo_2_path",
+      ],
     });
 
     if (!application) {
@@ -641,8 +663,20 @@ router.get("/get_application_files/:applicationID", async (req, res) => {
     };
 
     const files = [
-      buildFileEntry(application.technical_path, "technical"),
-      buildFileEntry(application.career_path,    "career"),
+      buildFileEntry(application.technical_path,                    "technical"),
+      buildFileEntry(application.career_path,                       "career"),
+      buildFileEntry(application.uipe_membership_letter_path,       "uipe_membership_letter"),
+      buildFileEntry(application.uipe_membership_certificate_path,  "uipe_membership_certificate"),
+      buildFileEntry(application.academic_certificates_path,        "academic_certificates"),
+      buildFileEntry(application.transcripts_path,                  "transcripts"),
+      buildFileEntry(application.uneb_certificates_path,            "uneb_certificates"),
+      buildFileEntry(application.verification_letters_path,         "verification_letters"),
+      buildFileEntry(application.other_qualifications_path,         "other_qualifications"),
+      buildFileEntry(application.employment_letters_path,           "employment_letters"),
+      buildFileEntry(application.organogram_path,                   "organogram"),
+      buildFileEntry(application.cpd_path,                          "cpd"),
+      buildFileEntry(application.passport_photo_1_path,             "passport_photo_1"),
+      buildFileEntry(application.passport_photo_2_path,              "passport_photo_2"),
     ].filter(Boolean); // drop nulls for files not yet uploaded
 
     res.status(200).json({

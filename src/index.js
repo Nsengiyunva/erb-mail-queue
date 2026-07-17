@@ -43,8 +43,7 @@ const allowedOrigins = [
   "http://localhost:3000",
   "https://registration.erb.go.ug",
   "https://data.erb.go.ug",
-  "https://erb.go.ug",
-  "https://mis.nec.go.ug",
+  "https://erb.go.ug"
 ];
 
 const corsOptions = {
@@ -54,7 +53,6 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  // x-watcher-secret needed for the VM1 payment watcher push
   allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "x-watcher-secret"],
 };
 
@@ -78,7 +76,7 @@ app.use((req, res, next) => {
 app.get("/api/erb/health", (_req, res) => {
   res.status(200).json({
     status:    "ok",
-    service:   "erb-api",
+    service:   "erb-helper",
     timestamp: new Date().toISOString(),
   });
 });
@@ -132,32 +130,6 @@ app.use("/api/erb/invoice",     invoiceRoutes);
 // Placed here so it has direct access to `io` without circular imports.
 const WATCHER_SECRET = 'bnNlbmdpeXVudmE6a2luZ0AjMjAyME5TRQ==';
 
-// app.post("/api/erb/receipt/payment-update", (req, res) => {
-//   const secret = req.headers["x-watcher-secret"];
-
-//   if (!WATCHER_SECRET || secret !== WATCHER_SECRET) {
-//     return res.status(403).json({ message: "Forbidden" });
-//   }
-
-//   const { request_id, status, amount, notes } = req.body;
-
-//   if (!request_id || !status) {
-//     return res.status(400).json({ message: "request_id and status are required" });
-//   }
-
-//   // ACK immediately so VM1 watcher does not block
-//   res.status(200).json({ received: true });
-
-//   // Push to the browser that joined room payment:{request_id}
-//   io.to(`payment:${request_id}`).emit("payment:update", {
-//     transactionRef: request_id,
-//     status:         status.toLowerCase(),
-//     amount,
-//     notes: notes || null,
-//   });
-
-//   console.log(`[payment-update] ${request_id} → ${status}`);
-// });
 
 app.post("/api/erb/receipt/payment-update", async (req, res) => {
   const secret = req.headers["x-watcher-secret"];
