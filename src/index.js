@@ -15,7 +15,7 @@ import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
-import { PaymentTransaction } from "./controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus } from "./controllers/receipt-controller.js";
 
 // Workers
 import "./workers/email_workers.js";
