@@ -118,22 +118,20 @@ router.post('/save-transaction', saveTransaction)
 // Applicant: returns only their own rows (filtered by applicant_id).
 router.get('/transactions', async (req, res) => {
   try {
-    const { Op, fn, col, where: wh } = await import('sequelize').then(m => m)
     const role        = (req.headers['x-user-role']  || '').toUpperCase()
     const applicantId = req.headers['x-applicant-id'] || null
 
-    const isAdmin = ['REGISTRAR', 'CHAIRMAN', 'ACCOUNTS', 'REGISTRATION'].includes(role)
+    const ADMIN_ROLES = ['REGISTRAR', 'CHAIRMAN', 'ACCOUNTS', 'REGISTRATION']
+    const isAdmin     = ADMIN_ROLES.includes(role)
 
     const whereClause = isAdmin
       ? {}
-      : applicantId
-        ? { applicant_id: parseInt(applicantId, 10) }
-        : { applicant_id: -1 } // returns nothing if no id passed as non-admin
+      : { applicant_id: parseInt(applicantId, 10) || -1 }
 
     const rows = await PaymentTransaction.findAll({
       where: whereClause,
       order: [['created_at', 'DESC']],
-      limit: 200,
+      limit: 500,
     })
 
     return res.json({ transactions: rows })
