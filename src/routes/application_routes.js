@@ -616,6 +616,40 @@ router.post(
   }
 )
 
+// ── POST /sponsor_document ──────────────────────────────────────
+// Uploads a sponsor's signed & stamped recommendation letter.
+// Unlike /engineer_documents, this does NOT write to a fixed DB
+// column — the returned filePath is stored by the frontend directly
+// on the corresponding entry inside the `sponsors` JSON array, which
+// is already persisted as part of the normal draft save/update flow.
+router.post(
+  "/sponsor_document",
+  upload.single("document"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "No file was uploaded" });
+      }
+
+      const filePath = path
+        .relative(process.cwd(), req.file.path)
+        .replace(/\\/g, "/");
+
+      return res.status(200).json({
+        message:  "Recommendation letter uploaded successfully",
+        filePath,
+      });
+
+    } catch (error) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      console.error("Sponsor document upload failed:", error);
+      return res.status(500).json({
+        message: error.message || "Failed to upload recommendation letter",
+      });
+    }
+  }
+)
+
 router.get("/get_application_files/:applicationID", async (req, res) => {
   try {
     const { applicationID } = req.params;
