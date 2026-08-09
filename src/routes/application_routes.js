@@ -549,9 +549,38 @@ router.post("/submit-application", async (req, res) => {
       }
     }
 
+    // Return the full saved row — not just the id. The frontend's autosave
+    // flow (every "Proceed" click on Section A/B/C/D) replaces its whole
+    // `state.draft` with this response body. If we only send back
+    // { message, applicationId }, state.draft collapses to that on every
+    // save, and Formik's `enableReinitialize` — watching a derived
+    // `initialValues` that reads from state.draft — resets the visible
+    // form back to blank for every field not in this tiny payload
+    // (first_name, surname, email_address, type, etc). The wizard's next
+    // save then persists those now-blank fields right back over the DB,
+    // which is what was erasing earlier steps' input. Parse the JSON text
+    // columns the same way GET /application/:applicant_id does, so the
+    // frontend always receives arrays for education/engineering/etc.
+    const rawApplication = application.toJSON();
+    const parseJsonColumn = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      try { return JSON.parse(val); } catch { return []; }
+    };
+    const fullApplication = {
+      ...rawApplication,
+      education:   parseJsonColumn(rawApplication.education),
+      engineering: parseJsonColumn(rawApplication.engineering),
+      training:    parseJsonColumn(rawApplication.training),
+      positions:   parseJsonColumn(rawApplication.positions),
+      membership:  parseJsonColumn(rawApplication.membership),
+      sponsors:    parseJsonColumn(rawApplication.sponsors),
+    };
+
     res.status(201).json({
       message: "Application submitted and queued successfully",
       applicationId: application.id,
+      application: fullApplication,
     });
 
   } catch (error) {
