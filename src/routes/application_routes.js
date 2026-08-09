@@ -437,6 +437,7 @@ const upload = multer({
 
 router.post("/submit-application", async (req, res) => {
   const transaction = await sequelize.transaction();
+  let committed = false;
 
   try {
     const payload = req.body;
@@ -486,25 +487,49 @@ router.post("/submit-application", async (req, res) => {
       );
     }
 
-    /**
-     * 2️⃣ Queue processing job
-     */
-    await applicationQueue.add(
-      "process-application",
-      {
-        ...payload,
-        applicationID: application.applicationID || application.id,
-        dbId: application.id, // 🔥 important for worker reference
-      },
-      {
-        attempts: 3,
-        backoff: { type: "exponential", delay: 5000 },
-        removeOnComplete: true,
-        removeOnFail: false,
-      }
-    );
-
+    // Commit the save now — this is the part that actually matters to the
+    // applicant (having an applicationID to keep working against). It must
+    // not be rolled back just because a downstream, best-effort step (the
+    // background processing queue, below) has trouble.
     await transaction.commit();
+    committed = true;
+
+    /**
+     * 2️⃣ Queue processing job — only for a real final submission.
+     * Every step of the wizard (Start, Section A, B, C, D) calls this same
+     * endpoint to autosave a draft; only draft_type === "COMPLETE" is an
+     * actual submission that needs certificate/notification processing.
+     * Queueing on every autosave was unnecessary load on Redis/BullMQ, and
+     * — because it used to happen *inside* the same DB transaction — any
+     * queue hiccup (e.g. Redis unreachable) rolled back the save entirely,
+     * wiping out the applicationID the frontend had just been given. That
+     * silent rollback is what caused "Application ID not found" further
+     * into the wizard.
+     */
+    if (String(payload?.draft_type).toUpperCase() === "COMPLETE") {
+      try {
+        await applicationQueue.add(
+          "process-application",
+          {
+            ...payload,
+            applicationID: application.applicationID || application.id,
+            dbId: application.id, // 🔥 important for worker reference
+          },
+          {
+            attempts: 3,
+            backoff: { type: "exponential", delay: 5000 },
+            removeOnComplete: true,
+            removeOnFail: false,
+          }
+        );
+      } catch (queueError) {
+        // The application record is already safely saved and committed —
+        // don't fail the request over a queueing problem. Log it so it can
+        // be reprocessed/investigated, but still tell the applicant their
+        // submission was received.
+        console.error("Failed to queue application for processing (record was still saved):", queueError);
+      }
+    }
 
     res.status(201).json({
       message: "Application submitted and queued successfully",
@@ -512,7 +537,13 @@ router.post("/submit-application", async (req, res) => {
     });
 
   } catch (error) {
-    await transaction.rollback();
+    if (!committed) {
+      try {
+        await transaction.rollback();
+      } catch (rollbackError) {
+        console.error("Rollback also failed:", rollbackError);
+      }
+    }
 
     console.error("Application submission failed:", error);
 
