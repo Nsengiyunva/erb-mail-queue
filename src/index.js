@@ -60,8 +60,13 @@ app.use(cors(corsOptions));
 app.options("/{*path}", cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Default express.json() limit is 100kb. The application wizard now
+// autosaves the full draft (education/engineering/training/positions/
+// membership/sponsors, all JSON-stringified) on every step, which can
+// exceed that easily — and when it does, express.json() silently skips
+// parsing rather than erroring, leaving req.body undefined downstream.
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // ── HTTPS redirect — x-forwarded-proto only, never req.protocol ──
 // req.protocol is always 'http' behind nginx, causing an infinite loop.

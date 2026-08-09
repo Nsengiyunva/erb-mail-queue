@@ -442,6 +442,24 @@ router.post("/submit-application", async (req, res) => {
   try {
     const payload = req.body;
 
+    // req.body can come back undefined (not even {}) when express.json()
+    // didn't parse the request at all — most commonly because the
+    // incoming Content-Type header wasn't application/json (missing,
+    // wrong value, or stripped by a proxy), or the body exceeded the
+    // parser's size limit. Guard instead of crashing, and log enough to
+    // diagnose which of those it is next time.
+    if (!payload || typeof payload !== "object") {
+      console.error(
+        "[submit-application] req.body missing/invalid — Content-Type:",
+        req.headers["content-type"],
+        "Content-Length:", req.headers["content-length"]
+      );
+      await transaction.rollback();
+      return res.status(400).json({
+        message: "Request body missing or not valid JSON. Please check your connection and try again.",
+      });
+    }
+
     const {
       applicant_id,
       email_address,
