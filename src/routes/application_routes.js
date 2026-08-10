@@ -395,7 +395,7 @@ import fs from "fs";
 import path from 'path'
 import multer from "multer";
 import { sequelize } from "../config/database.js";
-import { DataTypes } from "sequelize";
+import { DataTypes, Op } from "sequelize";
 import ApplicationModel from "../models/Application.js";
 import applicationQueue from "../queues/application_queue.js";
 
@@ -891,5 +891,157 @@ router.get("/application/:applicant_id", async (req, res) => {
 
 
 
+// ── GET /sponsor_requests/:sponsor_id ────────────────────────────
+// Returns every submitted application that named this engineer as a
+// sponsor, along with just that sponsor's own entry from the
+// application's `sponsors` array (name, discipline, recommendation
+// letter, approval status) so the sponsor dashboard doesn't need to
+// know about anyone else nominated on the same application.
+//
+// `sponsors` is a JSON TEXT column, so an exact-value SQL match isn't
+// possible — the LIKE filters down to rows that plausibly contain this
+// id, then each candidate is JSON-parsed and checked precisely (the
+// LIKE alone could false-positive, e.g. sponsor_id 1 inside "id":12).
+router.get("/sponsor_requests/:sponsor_id", async (req, res) => {
+  try {
+    const sponsorId = req.params.sponsor_id;
+
+    if (!sponsorId) {
+      return res.status(400).json({ message: "A valid sponsor ID is required" });
+    }
+
+    // Only applications that have actually been submitted — autosaved
+    // drafts (status "PENDING") never reach a sponsor's dashboard.
+    const SUBMITTED_STATUSES = [
+      "AWAITING_SPONSOR_APPROVAL",
+      "SPONSOR_APPROVED",
+      "BOARD_APPROVED",
+      "REGISTERED",
+      "COMPLETED",
+    ];
+
+    const candidates = await Application.findAll({
+      where: {
+        status: { [Op.in]: SUBMITTED_STATUSES },
+        sponsors: { [Op.like]: `%"id":${sponsorId}%` },
+      },
+    });
+
+    const parseCol = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      try { return JSON.parse(val); } catch { return []; }
+    };
+
+    const requests = candidates
+      .map((app) => {
+        const raw      = app.toJSON();
+        const sponsors = parseCol(raw.sponsors);
+        const mine      = sponsors.find(
+          (sp) => String(sp?.id) === String(sponsorId)
+        );
+        if (!mine) return null; // LIKE false-positive — discard
+
+        return {
+          applicationID:  raw.id,
+          applicant_name: raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+          applicant_email:raw.email_address,
+          application_type: raw.type,
+          application_status: raw.status,
+          submitted_at:   raw.updated_at || raw.created_at,
+          sponsor: {
+            status: mine.status || "PENDING",
+            recommendation_letter_path: mine.recommendation_letter_path || null,
+            recommendation_letter_name: mine.recommendation_letter_name || null,
+            approved_at: mine.approved_at || null,
+          },
+        };
+      })
+      .filter(Boolean);
+
+    return res.status(200).json({
+      message: "Sponsor requests fetched successfully",
+      requests,
+    });
+  } catch (error) {
+    console.error("Failed to fetch sponsor requests:", error);
+    return res.status(500).json({ message: "Failed to fetch sponsor requests" });
+  }
+});
+
+// ── POST /sponsor_approve ────────────────────────────────────────
+// A sponsor confirms their recommendation. There is no separate upload
+// step here by design — the applicant's own recommendation-letter
+// attachment (already required before they could submit) IS what the
+// sponsor is confirming, so approval is just a status flip on that
+// sponsor's entry inside the application's `sponsors` array.
+// Once every nominated sponsor has approved, the application itself
+// moves from AWAITING_SPONSOR_APPROVAL → SPONSOR_APPROVED so it appears
+// on the ERB board's docket.
+router.post("/sponsor_approve", async (req, res) => {
+  try {
+    const { applicationID, sponsor_id } = req.body || {};
+
+    if (!applicationID || !sponsor_id) {
+      return res.status(400).json({ message: "applicationID and sponsor_id are both required" });
+    }
+
+    const application = await Application.findOne({ where: { id: applicationID } });
+
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const parseCol = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      try { return JSON.parse(val); } catch { return []; }
+    };
+
+    const sponsors = parseCol(application.sponsors);
+    const index    = sponsors.findIndex((sp) => String(sp?.id) === String(sponsor_id));
+
+    if (index === -1) {
+      return res.status(404).json({ message: "You are not listed as a sponsor on this application" });
+    }
+
+    if (!sponsors[index].recommendation_letter_path) {
+      return res.status(400).json({
+        message: "No recommendation letter is attached for this sponsor — nothing to approve.",
+      });
+    }
+
+    if (sponsors[index].status === "APPROVED") {
+      return res.status(200).json({
+        message: "Already approved",
+        application_status: application.status,
+      });
+    }
+
+    sponsors[index] = {
+      ...sponsors[index],
+      status: "APPROVED",
+      approved_at: new Date().toISOString(),
+    };
+
+    const allApproved = sponsors.length > 0 && sponsors.every((sp) => sp?.status === "APPROVED");
+
+    await application.update({
+      sponsors: JSON.stringify(sponsors),
+      ...(allApproved && application.status === "AWAITING_SPONSOR_APPROVAL"
+        ? { status: "SPONSOR_APPROVED" }
+        : {}),
+    });
+
+    return res.status(200).json({
+      message: "Recommendation approved successfully",
+      application_status: application.status,
+      all_sponsors_approved: allApproved,
+    });
+  } catch (error) {
+    console.error("Failed to approve sponsor recommendation:", error);
+    return res.status(500).json({ message: "Failed to approve sponsor recommendation" });
+  }
+});
 
 export default router;

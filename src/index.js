@@ -26,6 +26,7 @@ import "./workers/receipt_worker.js";
 import "./workers/report_worker.js";
 import "./workers/application_worker.js";
 import "./workers/invoice_worker.js";
+import "./workers/sponsor_notification_worker.js";
 
 dotenv.config();
 

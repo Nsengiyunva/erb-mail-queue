@@ -1,8 +1,15 @@
 import { Worker } from 'bullmq';
 import connection from '../redis/connection.js';
 import * as db from '../models/index.js';
+import sponsorNotificationQueue from '../queues/sponsor_notification_queue.js';
 
 const Application = db.sequelize.models.Application;
+
+const parseJsonColumn = (val) => {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  try { return JSON.parse(val); } catch { return []; }
+};
 
 const worker = new Worker(
   'applicationQueue',
@@ -12,7 +19,7 @@ const worker = new Worker(
     const {
       applicationID,
       applicant_id,
-      email_address
+      email_address,
     } = payload;
 
     let application;
@@ -41,9 +48,16 @@ const worker = new Worker(
       // ── Check existing record ───────────────────────────────────
       application = await Application.findOne({ where: whereClause });
 
-      // ── Skip if already completed (retry-safe) ──────────────────
-      if (application?.status === 'COMPLETED') {
-        console.log(`[ApplicationWorker] Job ${job.id} already COMPLETED → skipping`);
+      // ── Skip if already processed past the autosave stage (retry-safe) ──
+      // Every autosave (Start/Section A/B/C/D) writes status "PENDING" via
+      // the synchronous /submit-application route handler. This queued job
+      // only ever runs for a genuine final submission (draft_type ===
+      // "COMPLETE"), so any status other than "PENDING" here means a prior
+      // run of this exact job already carried the application past the
+      // autosave stage — re-running would re-send sponsor notification
+      // emails on a BullMQ retry.
+      if (application && application.status && application.status !== 'PENDING') {
+        console.log(`[ApplicationWorker] Job ${job.id} already processed (status=${application.status}) → skipping`);
         return { success: true, skipped: true };
       }
 
@@ -51,35 +65,55 @@ const worker = new Worker(
       // passing it to create/update would cause another ER_BAD_FIELD_ERROR.
       const { applicationID: _dropped, ...dbPayload } = payload;
 
+      // NOTE: no `status:` override here. dbPayload already carries the
+      // real pipeline status the frontend set for this submission (e.g.
+      // "AWAITING_SPONSOR_APPROVAL") — this worker used to stomp on it
+      // with a generic "PROCESSING" → "COMPLETED" job-tracking status,
+      // which would make every application look fully registered the
+      // instant it was submitted, well before sponsors or the board had
+      // reviewed it.
+
       // ── CREATE ──────────────────────────────────────────────────
       if (!application) {
-        application = await Application.create({
-          ...dbPayload,
-          status: 'PROCESSING',
-        });
-
+        application = await Application.create({ ...dbPayload });
         console.log(`[ApplicationWorker] Created application → ${application.id}`);
-
       } else {
         // ── UPDATE (upsert behaviour) ──────────────────────────────
-        await application.update({
-          ...dbPayload,
-          status: 'PROCESSING',
-        });
-
+        await application.update({ ...dbPayload });
         console.log(`[ApplicationWorker] Updated application → ${application.id}`);
       }
 
-      await job.updateProgress(40);
+      await job.updateProgress(50);
 
-      // ── Additional processing steps go here ─────────────────────
-      // e.g. await validateApplication(dbPayload)
-      //      await triggerExternalService(dbPayload)
+      // ── Notify nominated sponsors ─────────────────────────────────
+      // Only for a real final submission, and only the first time this
+      // application reaches that state (guarded by the status check above
+      // plus a deterministic jobId below, so BullMQ retries never
+      // duplicate the emails).
+      const sponsors = parseJsonColumn(dbPayload.sponsors);
+      const applicantName =
+        dbPayload.name ||
+        [dbPayload.first_name, dbPayload.other_names, dbPayload.surname].filter(Boolean).join(' ');
 
-      await job.updateProgress(70);
-
-      // ── Finalise ─────────────────────────────────────────────────
-      await application.update({ status: 'COMPLETED' });
+      for (const sponsor of sponsors) {
+        if (!sponsor?.email_address) continue;
+        await sponsorNotificationQueue.add(
+          'notify-sponsor',
+          {
+            to:              sponsor.email_address,
+            sponsorName:     sponsor.sponsor_name,
+            applicantName,
+            applicationType: dbPayload.type,
+          },
+          {
+            jobId: `sponsor-notify-${application.id}-${sponsor.id || sponsor.registration_number || sponsor.email_address}`,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: true,
+            removeOnFail: false,
+          }
+        );
+      }
 
       await job.updateProgress(100);
 
@@ -87,13 +121,14 @@ const worker = new Worker(
         success:        true,
         application_id: application.id,
         email:          email_address,
+        sponsors_notified: sponsors.filter(s => s?.email_address).length,
       };
 
     } catch (err) {
       console.error(`[ApplicationWorker] Error for job ${job.id}`, err);
 
       // Mark as FAILED — swallow secondary errors so the original is re-thrown
-      if (application && application.status !== 'COMPLETED') {
+      if (application) {
         await application.update({ status: 'FAILED' }).catch(() => {});
       }
 
