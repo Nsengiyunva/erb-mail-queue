@@ -1192,7 +1192,16 @@ router.get("/registry", async (req, res) => {
 // NOTE: matched last among GET routes with a path param so it doesn't
 // shadow more specific routes like /registry, /sponsor_requests/:id, etc.
 // (Express matches top-down; this is intentionally placed after those.)
-router.get("/:id(\\d+)", async (req, res) => {
+// NOTE: deliberately a plain `/:id`, not `/:id(\d+)` — Express 5's
+// path-to-regexp (v6+) dropped support for inline regex constraints in
+// path strings; using that syntax throws at route-registration time,
+// which crashes the whole process on startup (every route in this file
+// returns 502, not just this one). Numeric validation happens inside
+// the handler instead.
+router.get("/:id", async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    return res.status(400).json({ message: "A valid numeric application ID is required" });
+  }
   try {
     const application = await Application.findOne({ where: { id: req.params.id } });
     if (!application) {
