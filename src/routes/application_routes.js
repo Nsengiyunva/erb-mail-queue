@@ -403,6 +403,57 @@ import { PaymentTransaction, normaliseStatus } from "../controllers/receipt-cont
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
 
+const parseJsonCol = (val) => {
+  if (!val) return [];
+  if (Array.isArray(val)) return val;
+  try { return JSON.parse(val); } catch { return []; }
+};
+
+// ── Effective status ─────────────────────────────────────────────
+// Policy (shared with application_worker.js and the frontend): an
+// attached recommendation letter IS a sponsor's approval — there's no
+// separate confirmation step. New submissions get this applied at
+// creation time by the worker, but applications submitted before that
+// rule shipped are still sitting on the DB with status
+// AWAITING_SPONSOR_APPROVAL even though every sponsor already has a
+// letter on file. Rather than require a one-off migration, every read
+// path recomputes the true status here — and opportunistically writes
+// the correction back (fire-and-forget) so it only needs recomputing
+// once per stale row.
+function computeEffectiveStatus(raw) {
+  if (raw.status !== "AWAITING_SPONSOR_APPROVAL") {
+    return { status: raw.status || "PENDING", sponsors: raw.sponsors, changed: false };
+  }
+  const sponsors = parseJsonCol(raw.sponsors);
+  const allSigned = sponsors.length > 0 && sponsors.every((sp) => !!sp?.recommendation_letter_path);
+  if (!allSigned) {
+    return { status: raw.status || "PENDING", sponsors: raw.sponsors, changed: false };
+  }
+  const signedSponsors = sponsors.map((sp) => ({
+    ...sp,
+    status: "APPROVED",
+    approved_at: sp.approved_at || new Date().toISOString(),
+  }));
+  return { status: "SPONSOR_APPROVED", sponsors: JSON.stringify(signedSponsors), changed: true };
+}
+
+// Read-only call sites (registry list, detail fetch) use this — it persists
+// the correction as a fire-and-forget write, since nothing else in those
+// requests writes to the same row afterward. board_approve deliberately
+// does NOT use this wrapper: it needs the pure computation so it can fold
+// the sponsor correction into its own single atomic update, rather than
+// risking this fire-and-forget write landing after (and clobbering) the
+// board-approval write.
+function deriveEffectiveStatus(row, raw) {
+  const effective = computeEffectiveStatus(raw);
+  if (effective.changed) {
+    row.update({ status: effective.status, sponsors: effective.sponsors }).catch((err) =>
+      console.error(`[application_routes] Failed to self-heal status for application ${raw.id}:`, err.message)
+    );
+  }
+  return effective;
+}
+
 
 const UPLOADS_DIR = path.resolve("/home/user1/uploads");
 
@@ -1059,8 +1110,14 @@ router.get("/registry", async (req, res) => {
     const search  = (req.query.search || "").trim();
     const status  = (req.query.status || "").trim().toUpperCase();
 
-    const where = { draft_type: "COMPLETE" };
-    if (status) where.status = status;
+    // status=DRAFT is a special case: it means "show in-progress drafts",
+    // i.e. everything that is NOT yet a genuine final submission — the
+    // opposite filter from every other tab, which all look at draft_type
+    // "COMPLETE" and then narrow by pipeline status.
+    const where = status === "DRAFT"
+      ? { draft_type: { [Op.ne]: "COMPLETE" } }
+      : { draft_type: "COMPLETE", ...(status ? { status } : {}) };
+
     if (search) {
       where[Op.or] = [
         { name:           { [Op.like]: `%${search}%` } },
@@ -1097,12 +1154,14 @@ router.get("/registry", async (req, res) => {
     const records = rows.map((row) => {
       const raw     = row.toJSON();
       const payment = latestPaymentByApp[String(raw.id)];
+      const effective = deriveEffectiveStatus(row, raw);
       return {
         id:                raw.id,
-        applicant_name:    raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        applicant_name:    raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" ") || "(unnamed draft)",
         email:             raw.email_address,
         type:              raw.type,
-        status:            raw.status || "PENDING",
+        status:            effective.status,
+        is_draft:          raw.draft_type !== "COMPLETE",
         payment_status:    payment ? normaliseStatus(payment.status) : "NOT_PAID",
         amount:            payment?.amount ?? null,
         submitted_at:      raw.updated_at || raw.created_at,
@@ -1122,6 +1181,128 @@ router.get("/registry", async (req, res) => {
   } catch (error) {
     console.error("Failed to fetch application registry:", error);
     return res.status(500).json({ message: "Failed to fetch applications" });
+  }
+});
+
+// ── GET /:id ──────────────────────────────────────────────────────
+// Full detail fetch for the admin "Submitted Applications" table's
+// View action — includes the parsed section data (education, engineering,
+// etc.), sponsors, and every attached-document path so the frontend can
+// render preview links without a second round trip.
+// NOTE: matched last among GET routes with a path param so it doesn't
+// shadow more specific routes like /registry, /sponsor_requests/:id, etc.
+// (Express matches top-down; this is intentionally placed after those.)
+router.get("/:id(\\d+)", async (req, res) => {
+  try {
+    const application = await Application.findOne({ where: { id: req.params.id } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const parseCol = (val) => {
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      try { return JSON.parse(val); } catch { return []; }
+    };
+
+    const raw = application.toJSON();
+
+    const DOCUMENT_FIELDS = [
+      { key: "technical_path",                   label: "Technical Report" },
+      { key: "career_path",                      label: "Career Summary Report" },
+      { key: "uipe_membership_letter_path",       label: "UIPE Membership Letter" },
+      { key: "uipe_membership_certificate_path",  label: "UIPE Membership Certificate" },
+      { key: "academic_certificates_path",        label: "Academic Certificates" },
+      { key: "transcripts_path",                  label: "Academic Transcripts" },
+      { key: "uneb_certificates_path",             label: "UNEB Certificates" },
+      { key: "verification_letters_path",          label: "UNEB Verification Letter(s)" },
+      { key: "other_qualifications_path",          label: "Other Qualifications" },
+      { key: "employment_letters_path",            label: "Employment Letter(s) / Service Contract(s)" },
+      { key: "organogram_path",                    label: "Organogram of Current Employer" },
+      { key: "cpd_path",                            label: "CPD Evidence" },
+      { key: "passport_photo_1_path",               label: "Passport Photograph 1" },
+      { key: "passport_photo_2_path",               label: "Passport Photograph 2" },
+    ];
+
+    const documents = DOCUMENT_FIELDS
+      .filter(d => !!raw[d.key])
+      .map(d => ({ label: d.label, path: raw[d.key] }));
+
+    const sponsors = parseCol(raw.sponsors).map(sp => ({
+      ...sp,
+      // Same policy as everywhere else: letter attached = signed.
+      signed: !!sp?.recommendation_letter_path,
+    }));
+
+    const effective = deriveEffectiveStatus(application, raw);
+
+    return res.status(200).json({
+      message: "Application fetched successfully",
+      application: {
+        ...raw,
+        status:      effective.status,
+        education:   parseCol(raw.education),
+        engineering: parseCol(raw.engineering),
+        training:    parseCol(raw.training),
+        positions:   parseCol(raw.positions),
+        membership:  parseCol(raw.membership),
+        sponsors,
+        documents,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to fetch application detail:", error);
+    return res.status(500).json({ message: "Failed to fetch application" });
+  }
+});
+
+// ── POST /board_approve ──────────────────────────────────────────
+// Lets a Registration-level admin approve an application on behalf of
+// the Board (used when the actual Board review workflow hasn't happened
+// in-system yet) — requires a comment for the record, and only applies
+// to applications genuinely awaiting board review.
+// NOTE: this router has no auth middleware attached (consistent with
+// every other endpoint in this file), so role enforcement currently
+// lives only in the frontend UI. `approved_by` is trusted from the
+// request body for the audit trail — worth tightening with real
+// server-side auth before this is relied on for compliance purposes.
+router.post("/board_approve", async (req, res) => {
+  try {
+    const { applicationID, comment, approved_by } = req.body || {};
+
+    if (!applicationID || !comment || !comment.trim()) {
+      return res.status(400).json({ message: "applicationID and a comment are both required" });
+    }
+
+    const application = await Application.findOne({ where: { id: applicationID } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const raw = application.toJSON();
+    const effective = computeEffectiveStatus(raw);
+
+    if (effective.status !== "SPONSOR_APPROVED") {
+      return res.status(400).json({
+        message: `This application isn't awaiting board review (current status: ${effective.status}).`,
+      });
+    }
+
+    await application.update({
+      status:             "BOARD_APPROVED",
+      sponsors:            effective.sponsors, // carries the sponsor-signed correction, if any, atomically
+      board_comment:       comment.trim(),
+      board_approved_by:   approved_by || "Admin",
+      board_approved_at:   new Date(),
+    });
+
+    return res.status(200).json({
+      message: "Application approved on behalf of the Board",
+      application_status: application.status,
+    });
+  } catch (error) {
+    console.error("Failed to record board approval:", error);
+    return res.status(500).json({ message: "Failed to approve application" });
   }
 });
 

@@ -114,6 +114,12 @@ export default (sequelize, DataTypes) => {
       cpd_path:                         DataTypes.STRING,
       passport_photo_1_path:            DataTypes.STRING,
       passport_photo_2_path:            DataTypes.STRING,
+      // Populated when a Registration-level admin approves an application
+      // on behalf of the Board (see /board_approve). NULL for applications
+      // the Board reviewed itself, once that flow exists separately.
+      board_comment:                    DataTypes.TEXT,
+      board_approved_by:                DataTypes.STRING,
+      board_approved_at:                DataTypes.DATE,
       status: {
         type:         DataTypes.STRING,
         defaultValue: 'PENDING',
