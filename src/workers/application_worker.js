@@ -65,9 +65,35 @@ const worker = new Worker(
       // passing it to create/update would cause another ER_BAD_FIELD_ERROR.
       const { applicationID: _dropped, ...dbPayload } = payload;
 
-      // NOTE: no `status:` override here. dbPayload already carries the
+      // ── Policy: an attached recommendation letter IS the sponsor's ──
+      // approval — there is no separate confirmation step for the sponsor
+      // to perform. The wizard already refuses to let an applicant submit
+      // unless every nominated sponsor has a letter on file (Application.jsx,
+      // step 4 gate), so by the time a submission reaches this worker,
+      // sponsor sign-off is already complete in substance. Reflect that
+      // immediately — both per-sponsor and on the application's overall
+      // pipeline status — instead of leaving it on AWAITING_SPONSOR_APPROVAL
+      // until someone visits the Sponsor Requests dashboard and clicks
+      // Approve (that manual path still exists and still works, it's just
+      // no longer the only way this status advances).
+      const sponsors = parseJsonColumn(dbPayload.sponsors);
+      const sponsorsSigned = sponsors.map(sp =>
+        sp?.recommendation_letter_path
+          ? { ...sp, status: 'APPROVED', approved_at: sp.approved_at || new Date().toISOString() }
+          : sp
+      );
+      const allSponsorsSigned = sponsorsSigned.length > 0 && sponsorsSigned.every(sp => sp?.recommendation_letter_path);
+      if (allSponsorsSigned) {
+        dbPayload.sponsors = JSON.stringify(sponsorsSigned);
+        if (dbPayload.status === 'AWAITING_SPONSOR_APPROVAL') {
+          dbPayload.status = 'SPONSOR_APPROVED';
+        }
+      }
+
+      // NOTE: no other `status:` override here. dbPayload already carries the
       // real pipeline status the frontend set for this submission (e.g.
-      // "AWAITING_SPONSOR_APPROVAL") — this worker used to stomp on it
+      // "AWAITING_SPONSOR_APPROVAL", now possibly upgraded to
+      // "SPONSOR_APPROVED" just above) — this worker used to stomp on it
       // with a generic "PROCESSING" → "COMPLETED" job-tracking status,
       // which would make every application look fully registered the
       // instant it was submitted, well before sponsors or the board had
@@ -90,12 +116,11 @@ const worker = new Worker(
       // application reaches that state (guarded by the status check above
       // plus a deterministic jobId below, so BullMQ retries never
       // duplicate the emails).
-      const sponsors = parseJsonColumn(dbPayload.sponsors);
       const applicantName =
         dbPayload.name ||
         [dbPayload.first_name, dbPayload.other_names, dbPayload.surname].filter(Boolean).join(' ');
 
-      for (const sponsor of sponsors) {
+      for (const sponsor of sponsorsSigned) {
         if (!sponsor?.email_address) continue;
         await sponsorNotificationQueue.add(
           'notify-sponsor',
@@ -121,7 +146,7 @@ const worker = new Worker(
         success:        true,
         application_id: application.id,
         email:          email_address,
-        sponsors_notified: sponsors.filter(s => s?.email_address).length,
+        sponsors_notified: sponsorsSigned.filter(s => s?.email_address).length,
       };
 
     } catch (err) {

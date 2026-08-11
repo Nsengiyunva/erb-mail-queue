@@ -398,6 +398,7 @@ import { sequelize } from "../config/database.js";
 import { DataTypes, Op } from "sequelize";
 import ApplicationModel from "../models/Application.js";
 import applicationQueue from "../queues/application_queue.js";
+import { PaymentTransaction, normaliseStatus } from "../controllers/receipt-controller.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
@@ -1041,6 +1042,86 @@ router.post("/sponsor_approve", async (req, res) => {
   } catch (error) {
     console.error("Failed to approve sponsor recommendation:", error);
     return res.status(500).json({ message: "Failed to approve sponsor recommendation" });
+  }
+});
+
+// ── GET /registry ─────────────────────────────────────────────────
+// Admin-facing table of every genuinely submitted application (i.e.
+// draft_type "COMPLETE" — excludes in-progress autosaved drafts, which
+// always carry status "PENDING" and were never meant to be reviewed).
+// Each row is enriched with its payment status, looked up from
+// PaymentTransaction by application_id since payment isn't tracked as a
+// column on Application itself.
+router.get("/registry", async (req, res) => {
+  try {
+    const page    = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const perPage = Math.min(Math.max(parseInt(req.query.per_page, 10) || 15, 1), 100);
+    const search  = (req.query.search || "").trim();
+    const status  = (req.query.status || "").trim().toUpperCase();
+
+    const where = { draft_type: "COMPLETE" };
+    if (status) where.status = status;
+    if (search) {
+      where[Op.or] = [
+        { name:           { [Op.like]: `%${search}%` } },
+        { first_name:     { [Op.like]: `%${search}%` } },
+        { surname:        { [Op.like]: `%${search}%` } },
+        { email_address:  { [Op.like]: `%${search}%` } },
+        { type:           { [Op.like]: `%${search}%` } },
+      ];
+    }
+
+    const { rows, count } = await Application.findAndCountAll({
+      where,
+      order: [["updated_at", "DESC"]],
+      limit:  perPage,
+      offset: (page - 1) * perPage,
+    });
+
+    // ── Payment lookup ─────────────────────────────────────────────
+    const appIds = rows.map((r) => String(r.id));
+    const payments = appIds.length
+      ? await PaymentTransaction.findAll({ where: { application_id: { [Op.in]: appIds } } })
+      : [];
+
+    // Keep only the most recent transaction per application (an applicant
+    // may have retried payment more than once).
+    const latestPaymentByApp = {};
+    for (const p of payments) {
+      const existing = latestPaymentByApp[p.application_id];
+      const pTime = new Date(p.updatedAt || p.createdAt || 0);
+      const eTime = existing ? new Date(existing.updatedAt || existing.createdAt || 0) : null;
+      if (!existing || pTime > eTime) latestPaymentByApp[p.application_id] = p;
+    }
+
+    const records = rows.map((row) => {
+      const raw     = row.toJSON();
+      const payment = latestPaymentByApp[String(raw.id)];
+      return {
+        id:                raw.id,
+        applicant_name:    raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        email:             raw.email_address,
+        type:              raw.type,
+        status:            raw.status || "PENDING",
+        payment_status:    payment ? normaliseStatus(payment.status) : "NOT_PAID",
+        amount:            payment?.amount ?? null,
+        submitted_at:      raw.updated_at || raw.created_at,
+      };
+    });
+
+    return res.status(200).json({
+      message: "Applications fetched successfully",
+      records,
+      pagination: {
+        currentPage:  page,
+        totalPages:   Math.max(Math.ceil(count / perPage), 1),
+        totalRecords: count,
+        perPage,
+      },
+    });
+  } catch (error) {
+    console.error("Failed to fetch application registry:", error);
+    return res.status(500).json({ message: "Failed to fetch applications" });
   }
 });
 

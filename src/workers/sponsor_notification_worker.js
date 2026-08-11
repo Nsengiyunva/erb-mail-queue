@@ -59,13 +59,13 @@ const worker = new Worker(
               <h2 style="margin-top: 0;">Dear ${displayName},</h2>
               <p>
                 <strong>${applicant}</strong> has named you as a sponsor on their
-                ${licenceType} application and is requesting your recommendation
-                for registration with the Engineers Registration Board.
+                ${licenceType} application with the Engineers Registration Board.
               </p>
               <p>
-                They have already attached a signed and stamped recommendation
-                letter to their application for your review. Please log in to the
-                ERB portal to view the request and confirm your recommendation.
+                Their signed and stamped recommendation letter naming you as sponsor
+                has been attached to the application — this letter is your recorded
+                endorsement, so no further action is needed from you. If you'd like
+                to review the request anyway, you can do so on the ERB portal.
               </p>
 
               <p style="text-align: center; margin: 28px 0;">
@@ -73,7 +73,7 @@ const worker = new Worker(
                    style="background-color: #1e40af; color: #ffffff; padding: 12px 24px;
                           border-radius: 6px; text-decoration: none; font-weight: bold;
                           display: inline-block;">
-                  Review Sponsor Request
+                  View Sponsor Request
                 </a>
               </p>
 
@@ -91,7 +91,7 @@ const worker = new Worker(
 
       await sendStyledMail(
         to,
-        'ERB: A Sponsor Recommendation Has Been Requested',
+        'ERB: You Were Named as a Sponsor',
         htmlContent,
       );
 
