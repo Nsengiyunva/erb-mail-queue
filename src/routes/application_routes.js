@@ -721,9 +721,15 @@ router.post(
       }
 
       // ── Normalize file path ─────────────────────────────────────────
-      const filePath = path
-        .relative(process.cwd(), req.file.path)
-        .replace(/\\/g, "/");
+      // Store just the filename (not a cwd-relative path). multer already
+      // writes every upload into UPLOADS_DIR, and the file is always
+      // served back from GET /api/erb/uploads/:filename — a path relative
+      // to process.cwd() (e.g. "../../uploads/x.pdf") is deployment-
+      // fragile (breaks if the process's working directory ever changes)
+      // and, worse, browsers silently normalize away leading "../"
+      // segments when it's concatenated into a URL, which is what was
+      // producing 404s on the frontend.
+      const filePath = path.basename(req.file.path);
 
       // ── Update application ──────────────────────────────────────────
       await application.update({ [column]: filePath });
@@ -761,9 +767,9 @@ router.post(
         return res.status(400).json({ message: "No file was uploaded" });
       }
 
-      const filePath = path
-        .relative(process.cwd(), req.file.path)
-        .replace(/\\/g, "/");
+      // Store just the filename — see the matching note in
+      // /engineer_documents above for why a cwd-relative path is fragile.
+      const filePath = path.basename(req.file.path);
 
       return res.status(200).json({
         message:  "Recommendation letter uploaded successfully",
