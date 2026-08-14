@@ -471,7 +471,11 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB
+  // Bumped from 30MB: applicants now merge every supporting document
+  // (UIPE membership, academic certs/transcripts, employment letters,
+  // organogram, CPD, etc.) into a single PDF alongside the Career
+  // Summary Report, so that one file needs more headroom.
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
   fileFilter: (_req, file, cb) => {
     const ALLOWED = [
       "application/pdf",
@@ -652,9 +656,27 @@ router.post("/submit-application", async (req, res) => {
   }
 })
 
+// Wraps upload.single() so a file exceeding the size limit (or any other
+// multer failure) returns a clean JSON error instead of an unhandled
+// exception — relevant now that the merged Career Summary Report PDF is
+// expected to be considerably larger than a single certificate scan.
+const uploadDocument = (req, res, next) => {
+  upload.single("document")(req, res, (err) => {
+    if (err) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({
+          message: "That file is too large. Please keep uploads under 50 MB — try compressing the PDF or lowering scan resolution.",
+        });
+      }
+      return res.status(400).json({ message: err.message || "File upload failed" });
+    }
+    next();
+  });
+};
+
 router.post(
   "/engineer_documents",
-  upload.single("document"),
+  uploadDocument,
   async (req, res) => {
     try {
       const { applicationID, file_title, applicant_id } = req.body;
