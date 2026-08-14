@@ -2,4 +2,6 @@ node_modules
 .env
 .env_production
 documentation.md
+.DS_Store
+ src/.DS_Store 
 
