@@ -713,6 +713,7 @@ router.post(
         "cpd records":                   "cpd_path",
         "passport photograph 1":         "passport_photo_1_path",
         "passport photograph 2":         "passport_photo_2_path",
+        "payment receipt":               "payment_receipt_path",
       };
 
       const normalizedTitle = file_title.toLowerCase().trim();
@@ -1190,7 +1191,13 @@ router.get("/registry", async (req, res) => {
         type:              raw.type,
         status:            effective.status,
         is_draft:          raw.draft_type !== "COMPLETE",
-        payment_status:    payment ? normaliseStatus(payment.status) : "NOT_PAID",
+        // No PaymentTransaction row means no Mobile Money attempt was made —
+        // but the applicant may instead have attached a payment receipt
+        // (see payment_receipt_path / TITLE_COLUMN_MAP "payment receipt"),
+        // which is an equally valid proof of payment.
+        payment_status:    payment
+          ? normaliseStatus(payment.status)
+          : (raw.payment_receipt_path ? "RECEIPT_UPLOADED" : "NOT_PAID"),
         amount:            payment?.amount ?? null,
         submitted_at:      raw.updated_at || raw.created_at,
       };
