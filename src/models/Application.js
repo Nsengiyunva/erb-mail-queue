@@ -57,6 +57,20 @@ export default (sequelize, DataTypes) => {
       board_comment:                    DataTypes.TEXT,
       board_approved_by:                DataTypes.STRING,
       board_approved_at:                DataTypes.DATE,
+      // Populated when a Registration-level admin defers an application
+      // back to the applicant for updates instead of approving it (see
+      // /defer). Mirrors the board_* fields above but for the other
+      // outcome of the same review step.
+      defer_comment:                    DataTypes.TEXT,
+      deferred_by:                      DataTypes.STRING,
+      deferred_at:                      DataTypes.DATE,
+      // Records the registration fee payment (paid after board/registration
+      // approval, separate from the earlier application-fee payment). See
+      // /registration_fee/initiate.
+      registration_fee_amount:          DataTypes.INTEGER,
+      registration_fee_status:          DataTypes.STRING,
+      registration_fee_ref:             DataTypes.STRING,
+      registration_fee_paid_at:         DataTypes.DATE,
       status: {
         type:         DataTypes.STRING,
         defaultValue: 'PENDING',

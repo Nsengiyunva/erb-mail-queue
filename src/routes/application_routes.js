@@ -1350,4 +1350,148 @@ router.post("/board_approve", async (req, res) => {
   }
 });
 
+// ── POST /defer ───────────────────────────────────────────────────
+// The other outcome of the same Registration-level review step as
+// /board_approve: instead of approving on behalf of the Board, the
+// officer sends the application back to the applicant with a comment
+// explaining what needs to change. Sets status DEFERRED.
+//
+// No special "resubmission" handling is needed here — the applicant's
+// edit-and-resubmit trip goes back through the existing
+// POST /submit-application route (same one the multi-step wizard
+// autosaves through), which unconditionally sets status back to
+// PENDING on every save. That naturally re-enters the normal pipeline
+// (PENDING → sponsor approval → SPONSOR_APPROVED → this review step
+// again) once the applicant resubmits — nothing DEFERRED-specific to
+// unwind.
+router.post("/defer", async (req, res) => {
+  try {
+    const { applicationID, comment, deferred_by } = req.body || {};
+
+    if (!applicationID || !comment || !comment.trim()) {
+      return res.status(400).json({ message: "applicationID and a comment are both required" });
+    }
+
+    const application = await Application.findOne({ where: { id: applicationID } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const raw = application.toJSON();
+    const effective = computeEffectiveStatus(raw);
+
+    if (effective.status !== "SPONSOR_APPROVED") {
+      return res.status(400).json({
+        message: `This application isn't awaiting review, so it can't be deferred (current status: ${effective.status}).`,
+      });
+    }
+
+    await application.update({
+      status:         "DEFERRED",
+      sponsors:       effective.sponsors,
+      defer_comment:  comment.trim(),
+      deferred_by:    deferred_by || "Admin",
+      deferred_at:    new Date(),
+    });
+
+    return res.status(200).json({
+      message: "Application sent back to the applicant for updates",
+      application_status: application.status,
+    });
+  } catch (error) {
+    console.error("Failed to record defer:", error);
+    return res.status(500).json({ message: "Failed to defer application" });
+  }
+});
+
+// ── Annual registration fees (paid after approval) ──────────────────
+// Distinct from the application fee (paid at submission, see
+// License/forms/Payment.js on the frontend). Keyed by application
+// `type`/`category` the same way the frontend's app_fees table is.
+const REGISTRATION_FEES = {
+  CORPORATE:    1055900,
+  TEMPORARY:    3045700,
+  TECHNOLOGIST:  761450,
+  TECHNICIAN:    609150,
+};
+
+function resolveRegistrationFee(application) {
+  const key = String(application.category || application.profession || application.type || "")
+    .trim()
+    .toUpperCase();
+  return REGISTRATION_FEES[key] ?? null;
+}
+
+// ── GET /registration_fee/:id ────────────────────────────────────
+// Lets the applicant's page look up the fee amount for their own
+// category/profession without duplicating the fee table on the frontend.
+router.get("/registration_fee/:id", async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    return res.status(400).json({ message: "A valid numeric application ID is required" });
+  }
+  try {
+    const application = await Application.findOne({ where: { id: req.params.id } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+    const raw    = application.toJSON();
+    const amount = resolveRegistrationFee(raw);
+    return res.status(200).json({
+      message: "Registration fee resolved",
+      amount,
+      status: raw.registration_fee_status || "NOT_PAID",
+      paid_at: raw.registration_fee_paid_at,
+    });
+  } catch (error) {
+    console.error("Failed to resolve registration fee:", error);
+    return res.status(500).json({ message: "Failed to resolve registration fee" });
+  }
+});
+
+// ── POST /registration_fee/initiate ──────────────────────────────
+// NOTE: this records the fee as INITIATED and returns the amount —
+// it does NOT yet call FlexiPay. The application-fee payment (Payment.js
+// on the frontend) is initiated from a service this codebase doesn't
+// contain (no /flexi/* call exists anywhere in erb-helper or the src
+// frontend that were reviewed for this change), so wiring the actual
+// Mobile Money prompt here needs whichever service currently owns that
+// call — see the standing question about this before treating this
+// endpoint as payment-complete.
+router.post("/registration_fee/initiate", async (req, res) => {
+  try {
+    const { applicationID, phone } = req.body || {};
+    if (!applicationID) {
+      return res.status(400).json({ message: "applicationID is required" });
+    }
+
+    const application = await Application.findOne({ where: { id: applicationID } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const raw    = application.toJSON();
+    const amount = resolveRegistrationFee(raw);
+    if (!amount) {
+      return res.status(400).json({ message: "Could not determine the registration fee for this application's category." });
+    }
+    if (String(raw.status).toUpperCase() !== "BOARD_APPROVED") {
+      return res.status(400).json({ message: "Registration fees can only be paid after approval." });
+    }
+
+    await application.update({
+      registration_fee_amount: amount,
+      registration_fee_status: "INITIATED",
+    });
+
+    return res.status(200).json({
+      message: "Registration fee payment initiated",
+      amount,
+      phone,
+    });
+  } catch (error) {
+    console.error("Failed to initiate registration fee payment:", error);
+    return res.status(500).json({ message: "Failed to initiate registration fee payment" });
+  }
+});
+
 export default router;
