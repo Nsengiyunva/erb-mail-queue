@@ -7,7 +7,7 @@ import ReceiptModel  from '../models/Receipt.js'
 import { DataTypes } from 'sequelize'
 import receiptQueue  from '../queues/receipt_queue.js'
 
-import { saveTransaction, PaymentTransaction } from '../controllers/receipt-controller.js'
+import { saveTransaction, submitReceiptPayment, PaymentTransaction } from '../controllers/receipt-controller.js'
 
 const router  = express.Router()
 const Receipt = ReceiptModel(sequelize, DataTypes)
@@ -113,6 +113,16 @@ router.post('/upload-wed-receipt', upload_receipt.single('file'), async (req, re
 })
 
 router.post('/save-transaction', saveTransaction)
+
+// ── POST /renewal-payment ─────────────────────────────────────────
+// Instant-payment endpoint for the "Attach Receipt" option on the
+// Renewal Payment screen. Multipart: field name is "receipt". The
+// frontend only calls this once, on the final Submit click, with the
+// receipt file plus the applicant's details — see submitReceiptPayment
+// in receipt-controller.js for why this marks the transaction SUCCESS
+// immediately rather than leaving it pending review.
+router.options('/renewal-payment', cors(corsOptions), (_req, res) => res.sendStatus(204))
+router.post('/renewal-payment', upload.single('receipt'), submitReceiptPayment)
 
 // ── GET /transactions ─────────────────────────────────────────────
 // Admin: returns all transactions (most recent first, paginated).
