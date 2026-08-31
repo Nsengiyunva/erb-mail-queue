@@ -15,7 +15,7 @@ import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
-import { PaymentTransaction, normaliseStatus } from "./controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, maybeSendReceiptEmail } from "./controllers/receipt-controller.js";
 
 // Workers
 import "./workers/email_workers.js";
@@ -27,6 +27,9 @@ import "./workers/report_worker.js";
 import "./workers/application_worker.js";
 import "./workers/invoice_worker.js";
 import "./workers/sponsor_notification_worker.js";
+// Was never imported, so no worker process was ever consuming
+// paymentReceiptQueue jobs — anything enqueued to it just sat there.
+import "./workers/payment_receipt_worker.js";
 
 dotenv.config();
 
@@ -169,6 +172,19 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
       console.warn(`[payment-update] no row matched transaction_ref=${request_id}`);
     } else {
       console.log(`[payment-update] DB updated ${request_id} → ${dbStatus} (${affected} row)`);
+
+      // This is the real "the applicant successfully paid" signal — the
+      // watcher only calls this once it has confirmed the Mobile Money
+      // payment actually went through. Generate the official PDF receipt
+      // and queue it for email. Re-fetch so maybeSendReceiptEmail sees the
+      // row with the status/amount just written above (the `affected`
+      // count from .update() doesn't give us the row itself).
+      if (dbStatus === "SUCCESS") {
+        const record = await PaymentTransaction.findOne({ where: { transaction_ref: String(request_id) } });
+        maybeSendReceiptEmail(record).catch(err =>
+          console.error(`[payment-update] receipt pipeline failed for ${request_id}:`, err.message)
+        );
+      }
     }
   } catch (err) {
     // Don't fail the request — we've already ACKed. Just log it.
