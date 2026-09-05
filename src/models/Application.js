@@ -57,6 +57,13 @@ export default (sequelize, DataTypes) => {
       board_comment:                    DataTypes.TEXT,
       board_approved_by:                DataTypes.STRING,
       board_approved_at:                DataTypes.DATE,
+      // Populated by the Accounts-level payment-verification step that
+      // now sits between sponsor approval and board review (see
+      // /accounts_verify) — confirms the applicant actually paid before
+      // the file reaches the Board.
+      accounts_comment:                 DataTypes.TEXT,
+      accounts_verified_by:             DataTypes.STRING,
+      accounts_verified_at:             DataTypes.DATE,
       // Populated when a Registration-level admin defers an application
       // back to the applicant for updates instead of approving it (see
       // /defer). Mirrors the board_* fields above but for the other

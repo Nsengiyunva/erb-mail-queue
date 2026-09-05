@@ -1029,6 +1029,7 @@ router.get("/sponsor_requests/:sponsor_id", async (req, res) => {
     const SUBMITTED_STATUSES = [
       "AWAITING_SPONSOR_APPROVAL",
       "SPONSOR_APPROVED",
+      "ACCOUNTS_APPROVED",
       "BOARD_APPROVED",
       "REGISTERED",
       "COMPLETED",
@@ -1217,11 +1218,12 @@ router.get("/registry", async (req, res) => {
     // REGISTERED and COMPLETED both render as the "Registered" tab/badge
     // (see STATUS_META on the frontend), so their counts combine here too.
     const counts = {
-      DRAFT:            draftCount,
-      SPONSOR_APPROVED: countsByStatus.SPONSOR_APPROVED || 0,
-      DEFERRED:         countsByStatus.DEFERRED || 0,
-      BOARD_APPROVED:   countsByStatus.BOARD_APPROVED || 0,
-      REGISTERED:       (countsByStatus.REGISTERED || 0) + (countsByStatus.COMPLETED || 0),
+      DRAFT:             draftCount,
+      SPONSOR_APPROVED:  countsByStatus.SPONSOR_APPROVED || 0,
+      ACCOUNTS_APPROVED: countsByStatus.ACCOUNTS_APPROVED || 0,
+      DEFERRED:          countsByStatus.DEFERRED || 0,
+      BOARD_APPROVED:    countsByStatus.BOARD_APPROVED || 0,
+      REGISTERED:        (countsByStatus.REGISTERED || 0) + (countsByStatus.COMPLETED || 0),
     };
 
     // ── Payment lookup ─────────────────────────────────────────────
@@ -1258,6 +1260,13 @@ router.get("/registry", async (req, res) => {
         payment_status:    payment
           ? normaliseStatus(payment.status)
           : (raw.payment_receipt_path ? "RECEIPT_UPLOADED" : "NOT_PAID"),
+        // How the applicant paid (or intends to), independent of whether
+        // it's actually confirmed yet — lets accounts tell "paid via
+        // FlexiPay" apart from "uploaded a receipt to verify manually"
+        // at a glance, before opening the application.
+        payment_mode:      payment
+          ? "ONLINE"
+          : (raw.payment_receipt_path ? "RECEIPT" : null),
         amount:            payment?.amount ?? null,
         submitted_at:      raw.updated_at || raw.created_at,
       };
@@ -1366,11 +1375,127 @@ router.get("/:id", async (req, res) => {
   }
 });
 
+// ── POST /accounts_verify ────────────────────────────────────────
+// New payment-verification stage, sitting between sponsor approval and
+// board review: an Accounts-level admin confirms the applicant has
+// actually paid (FlexiPay or an uploaded receipt — see payment_mode on
+// GET /registry) before the file goes to the Board. Requires a comment
+// for the record, same pattern as /board_approve.
+router.post("/accounts_verify", async (req, res) => {
+  try {
+    const { applicationID, comment, verified_by } = req.body || {};
+
+    if (!applicationID || !comment || !comment.trim()) {
+      return res.status(400).json({ message: "applicationID and a comment are both required" });
+    }
+
+    const application = await Application.findOne({ where: { id: applicationID } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const raw = application.toJSON();
+    const effective = computeEffectiveStatus(raw);
+
+    if (effective.status !== "SPONSOR_APPROVED") {
+      return res.status(400).json({
+        message: `This application isn't awaiting payment verification (current status: ${effective.status}).`,
+      });
+    }
+
+    await application.update({
+      status:               "ACCOUNTS_APPROVED",
+      sponsors:              effective.sponsors, // carries the sponsor-signed correction, if any, atomically
+      accounts_comment:      comment.trim(),
+      accounts_verified_by:  verified_by || "Admin",
+      accounts_verified_at:  new Date(),
+    });
+
+    return res.status(200).json({
+      message: "Payment verified — application forwarded to the Board for review",
+      application_status: application.status,
+    });
+  } catch (error) {
+    console.error("Failed to record accounts verification:", error);
+    return res.status(500).json({ message: "Failed to verify payment for this application" });
+  }
+});
+
+// ── POST /accounts_defer ─────────────────────────────────────────
+// The other outcome of the accounts stage: payment couldn't be
+// confirmed, so the application goes straight back to the applicant —
+// same DEFERRED status and same "Edit application" resubmission path
+// as a board-stage defer (see /defer below). From the applicant's side
+// there's no difference between the two; this only differs in which
+// stage sent it back, recorded here for the audit trail.
+router.post("/accounts_defer", async (req, res) => {
+  try {
+    const { applicationID, comment, deferred_by } = req.body || {};
+
+    if (!applicationID || !comment || !comment.trim()) {
+      return res.status(400).json({ message: "applicationID and a comment are both required" });
+    }
+
+    const application = await Application.findOne({ where: { id: applicationID } });
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    const raw = application.toJSON();
+    const effective = computeEffectiveStatus(raw);
+
+    if (effective.status !== "SPONSOR_APPROVED") {
+      return res.status(400).json({
+        message: `This application isn't awaiting payment verification, so it can't be deferred here (current status: ${effective.status}).`,
+      });
+    }
+
+    await application.update({
+      status:         "DEFERRED",
+      sponsors:       effective.sponsors,
+      defer_comment:  comment.trim(),
+      deferred_by:    deferred_by || "Admin",
+      deferred_at:    new Date(),
+    });
+
+    try {
+      await applicationStatusEmailQueue.add(
+        "application-deferred-email",
+        {
+          type:            "SENT_BACK",
+          to:              raw.email_address,
+          applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+          trackingNumber:  trackingNumber(application.id),
+          applicationType: raw.type,
+          reason:          comment.trim(),
+        },
+        {
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        }
+      );
+    } catch (emailQueueError) {
+      console.error("Failed to queue application-sent-back email (accounts defer was still recorded):", emailQueueError);
+    }
+
+    return res.status(200).json({
+      message: "Application sent back to the applicant for payment",
+      application_status: application.status,
+    });
+  } catch (error) {
+    console.error("Failed to record accounts defer:", error);
+    return res.status(500).json({ message: "Failed to defer application" });
+  }
+});
+
 // ── POST /board_approve ──────────────────────────────────────────
 // Lets a Registration-level admin approve an application on behalf of
 // the Board (used when the actual Board review workflow hasn't happened
 // in-system yet) — requires a comment for the record, and only applies
-// to applications genuinely awaiting board review.
+// to applications genuinely awaiting board review (i.e. accounts has
+// already verified payment — see /accounts_verify above).
 // NOTE: this router has no auth middleware attached (consistent with
 // every other endpoint in this file), so role enforcement currently
 // lives only in the frontend UI. `approved_by` is trusted from the
@@ -1392,7 +1517,7 @@ router.post("/board_approve", async (req, res) => {
     const raw = application.toJSON();
     const effective = computeEffectiveStatus(raw);
 
-    if (effective.status !== "SPONSOR_APPROVED") {
+    if (effective.status !== "ACCOUNTS_APPROVED") {
       return res.status(400).json({
         message: `This application isn't awaiting board review (current status: ${effective.status}).`,
       });
@@ -1468,16 +1593,20 @@ router.post("/board_approve", async (req, res) => {
 // The other outcome of the same Registration-level review step as
 // /board_approve: instead of approving on behalf of the Board, the
 // officer sends the application back to the applicant with a comment
-// explaining what needs to change. Sets status DEFERRED.
+// explaining what needs to change. Sets status DEFERRED. (The
+// equivalent action at the earlier payment-verification stage is
+// /accounts_defer — both land on the same DEFERRED status, since from
+// the applicant's side "sent back" means the same thing regardless of
+// which stage sent it.)
 //
 // No special "resubmission" handling is needed here — the applicant's
 // edit-and-resubmit trip goes back through the existing
 // POST /submit-application route (same one the multi-step wizard
 // autosaves through), which unconditionally sets status back to
 // PENDING on every save. That naturally re-enters the normal pipeline
-// (PENDING → sponsor approval → SPONSOR_APPROVED → this review step
-// again) once the applicant resubmits — nothing DEFERRED-specific to
-// unwind.
+// (PENDING → sponsor approval → SPONSOR_APPROVED → accounts verify →
+// ACCOUNTS_APPROVED → this review step again) once the applicant
+// resubmits — nothing DEFERRED-specific to unwind.
 router.post("/defer", async (req, res) => {
   try {
     const { applicationID, comment, deferred_by } = req.body || {};
@@ -1494,9 +1623,9 @@ router.post("/defer", async (req, res) => {
     const raw = application.toJSON();
     const effective = computeEffectiveStatus(raw);
 
-    if (effective.status !== "SPONSOR_APPROVED") {
+    if (effective.status !== "ACCOUNTS_APPROVED") {
       return res.status(400).json({
-        message: `This application isn't awaiting review, so it can't be deferred (current status: ${effective.status}).`,
+        message: `This application isn't awaiting board review, so it can't be deferred here (current status: ${effective.status}).`,
       });
     }
 
