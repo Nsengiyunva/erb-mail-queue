@@ -1197,12 +1197,32 @@ router.get("/registry", async (req, res) => {
       offset: (page - 1) * perPage,
     });
 
-    // Draft count is independent of whatever tab/search is currently
-    // active — the frontend shows it as a badge on the "Drafts" tab
-    // itself, so it needs to reflect the true total, not the filtered one.
+    // Tab counts are independent of whatever tab/search is currently
+    // active — the frontend shows these as badges on the tabs themselves,
+    // so they need to reflect the true totals, not the filtered one.
     const draftCount = await Application.count({
       where: { draft_type: { [Op.ne]: "COMPLETE" } },
     });
+
+    const statusCountRows = await Application.findAll({
+      attributes: ["status", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
+      where: { draft_type: "COMPLETE" },
+      group: ["status"],
+      raw: true,
+    });
+    const countsByStatus = {};
+    for (const row of statusCountRows) {
+      countsByStatus[String(row.status || "").toUpperCase()] = parseInt(row.count, 10) || 0;
+    }
+    // REGISTERED and COMPLETED both render as the "Registered" tab/badge
+    // (see STATUS_META on the frontend), so their counts combine here too.
+    const counts = {
+      DRAFT:            draftCount,
+      SPONSOR_APPROVED: countsByStatus.SPONSOR_APPROVED || 0,
+      DEFERRED:         countsByStatus.DEFERRED || 0,
+      BOARD_APPROVED:   countsByStatus.BOARD_APPROVED || 0,
+      REGISTERED:       (countsByStatus.REGISTERED || 0) + (countsByStatus.COMPLETED || 0),
+    };
 
     // ── Payment lookup ─────────────────────────────────────────────
     const appIds = rows.map((r) => String(r.id));
@@ -1252,9 +1272,7 @@ router.get("/registry", async (req, res) => {
         totalRecords: count,
         perPage,
       },
-      counts: {
-        draft: draftCount,
-      },
+      counts,
     });
   } catch (error) {
     console.error("Failed to fetch application registry:", error);
@@ -1309,6 +1327,11 @@ router.get("/:id", async (req, res) => {
       { key: "cpd_path",                            label: "CPD Evidence" },
       { key: "passport_photo_1_path",               label: "Passport Photograph 1" },
       { key: "passport_photo_2_path",               label: "Passport Photograph 2" },
+      // Applicants can prove payment either via FlexiPay (a PaymentTransaction
+      // row, looked up separately) or by uploading a receipt directly — see
+      // the payment_status fallback in GET /registry. Surfacing it here too
+      // means the approver can actually open/verify it from the detail modal.
+      { key: "payment_receipt_path",                 label: "Payment Receipt" },
     ];
 
     const documents = DOCUMENT_FIELDS
