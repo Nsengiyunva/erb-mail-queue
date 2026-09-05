@@ -397,11 +397,19 @@ import multer from "multer";
 import { sequelize } from "../config/database.js";
 import { DataTypes, Op } from "sequelize";
 import ApplicationModel from "../models/Application.js";
+import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
+import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { PaymentTransaction, normaliseStatus } from "../controllers/receipt-controller.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
+const OldUser = OldUserModel(sequelize, DataTypes);
+
+// Same ERB-##### format the frontend already renders (see
+// SubmittedApplications.js / DisplayApplication.js `String(id).padStart(5,'0')`)
+// — used as the tracking number in every applicant-facing email below.
+const trackingNumber = (id) => `ERB-${String(id).padStart(5, "0")}`;
 
 const parseJsonCol = (val) => {
   if (!val) return [];
@@ -602,6 +610,31 @@ router.post("/submit-application", async (req, res) => {
         // be reprocessed/investigated, but still tell the applicant their
         // submission was received.
         console.error("Failed to queue application for processing (record was still saved):", queueError);
+      }
+
+      // Applicant-facing confirmation email with their tracking number.
+      // Fires on every genuine final submission — including a resubmission
+      // after being sent back (see /defer) — since draft_type only flips
+      // to COMPLETE at that point, never on the wizard's step autosaves.
+      try {
+        await applicationStatusEmailQueue.add(
+          "application-received-email",
+          {
+            type:            "RECEIVED",
+            to:              payload.email_address,
+            applicantName:   payload.name || [payload.first_name, payload.other_names, payload.surname].filter(Boolean).join(" "),
+            trackingNumber:  trackingNumber(application.id),
+            applicationType: payload.type,
+          },
+          {
+            attempts: 3,
+            backoff: { type: "exponential", delay: 5000 },
+            removeOnComplete: true,
+            removeOnFail: false,
+          }
+        );
+      } catch (emailQueueError) {
+        console.error("Failed to queue application-received email (application was still saved):", emailQueueError);
       }
     }
 
@@ -1164,6 +1197,13 @@ router.get("/registry", async (req, res) => {
       offset: (page - 1) * perPage,
     });
 
+    // Draft count is independent of whatever tab/search is currently
+    // active — the frontend shows it as a badge on the "Drafts" tab
+    // itself, so it needs to reflect the true total, not the filtered one.
+    const draftCount = await Application.count({
+      where: { draft_type: { [Op.ne]: "COMPLETE" } },
+    });
+
     // ── Payment lookup ─────────────────────────────────────────────
     const appIds = rows.map((r) => String(r.id));
     const payments = appIds.length
@@ -1211,6 +1251,9 @@ router.get("/registry", async (req, res) => {
         totalPages:   Math.max(Math.ceil(count / perPage), 1),
         totalRecords: count,
         perPage,
+      },
+      counts: {
+        draft: draftCount,
       },
     });
   } catch (error) {
@@ -1312,7 +1355,7 @@ router.get("/:id", async (req, res) => {
 // server-side auth before this is relied on for compliance purposes.
 router.post("/board_approve", async (req, res) => {
   try {
-    const { applicationID, comment, approved_by } = req.body || {};
+    const { applicationID, comment, approved_by, license_number } = req.body || {};
 
     if (!applicationID || !comment || !comment.trim()) {
       return res.status(400).json({ message: "applicationID and a comment are both required" });
@@ -1332,17 +1375,65 @@ router.post("/board_approve", async (req, res) => {
       });
     }
 
+    const trimmedLicenseNumber = license_number ? String(license_number).trim() : null;
+
     await application.update({
       status:             "BOARD_APPROVED",
       sponsors:            effective.sponsors, // carries the sponsor-signed correction, if any, atomically
       board_comment:       comment.trim(),
       board_approved_by:   approved_by || "Admin",
       board_approved_at:   new Date(),
+      ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
     });
+
+    // ── Mirror the approval onto the legacy old_users table ──────────
+    // See models/OldUser.js — the join key (email) and column names are
+    // a best guess pending confirmation. Failure here is logged but
+    // never fails the approval itself: the application record is the
+    // source of truth, and this is a best-effort mirror of it.
+    if (raw.email_address) {
+      try {
+        const oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
+        if (oldUser) {
+          await oldUser.update({
+            registered: "Yes",
+            ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
+          });
+        } else {
+          console.warn(`[board_approve] No old_users row found for ${raw.email_address} — registered flag not updated.`);
+        }
+      } catch (oldUserError) {
+        console.error("[board_approve] Failed to update old_users row:", oldUserError);
+      }
+    }
+
+    // Applicant-facing approval email.
+    try {
+      await applicationStatusEmailQueue.add(
+        "application-approved-email",
+        {
+          type:            "APPROVED",
+          to:              raw.email_address,
+          applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+          trackingNumber:  trackingNumber(application.id),
+          applicationType: raw.type,
+          licenseNumber:   trimmedLicenseNumber,
+        },
+        {
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        }
+      );
+    } catch (emailQueueError) {
+      console.error("Failed to queue application-approved email (approval was still recorded):", emailQueueError);
+    }
 
     return res.status(200).json({
       message: "Application approved on behalf of the Board",
       application_status: application.status,
+      license_number: trimmedLicenseNumber,
     });
   } catch (error) {
     console.error("Failed to record board approval:", error);
@@ -1393,6 +1484,34 @@ router.post("/defer", async (req, res) => {
       deferred_by:    deferred_by || "Admin",
       deferred_at:    new Date(),
     });
+
+    // Applicant-facing email with the reason it was sent back. The
+    // "put it in draft mode and allow edit/resubmit" part of this needs
+    // no extra work here — DisplayApplication.js already shows an "Edit
+    // application" action for status DEFERRED, and re-submitting goes
+    // back through POST /submit-application, which unconditionally
+    // resets status to PENDING (see the comment above this route).
+    try {
+      await applicationStatusEmailQueue.add(
+        "application-deferred-email",
+        {
+          type:            "SENT_BACK",
+          to:              raw.email_address,
+          applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+          trackingNumber:  trackingNumber(application.id),
+          applicationType: raw.type,
+          reason:          comment.trim(),
+        },
+        {
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        }
+      );
+    } catch (emailQueueError) {
+      console.error("Failed to queue application-sent-back email (defer was still recorded):", emailQueueError);
+    }
 
     return res.status(200).json({
       message: "Application sent back to the applicant for updates",

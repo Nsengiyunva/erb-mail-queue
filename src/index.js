@@ -30,6 +30,9 @@ import "./workers/sponsor_notification_worker.js";
 // Was never imported, so no worker process was ever consuming
 // paymentReceiptQueue jobs — anything enqueued to it just sat there.
 import "./workers/payment_receipt_worker.js";
+// Applicant-facing lifecycle emails: submission received, sent back
+// for updates, and approved (see routes/application_routes.js).
+import "./workers/application_status_email_worker.js";
 
 dotenv.config();
 

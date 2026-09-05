@@ -64,6 +64,10 @@ export default (sequelize, DataTypes) => {
       defer_comment:                    DataTypes.TEXT,
       deferred_by:                      DataTypes.STRING,
       deferred_at:                      DataTypes.DATE,
+      // Set by a Registration-level admin at the same time as board
+      // approval (see /board_approve) — optional, since not every
+      // applicant type is issued a licence number at this step.
+      license_number:                   DataTypes.STRING,
       // Records the registration fee payment (paid after board/registration
       // approval, separate from the earlier application-fee payment). See
       // /registration_fee/initiate.
