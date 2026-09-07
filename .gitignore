@@ -3,7 +3,6 @@ node_modules
 .env_production
 documentation.md
 .DS_Store
- src/.DS_Store 
- POINTERS.md
+ src/.DS_Store
 .DS_Store
 

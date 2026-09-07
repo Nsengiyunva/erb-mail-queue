@@ -147,3 +147,115 @@ export function generateReceiptPdf(tx) {
     }
   })
 }
+
+// ── Bulk-upload engineer license receipts ──────────────────────────
+// Different shape from generateReceiptPdf() above (that one is for the
+// instant "Attach Receipt" MoMo flow, keyed off a PaymentTransaction).
+// This one matches the annual-fee receipt fields used by the
+// Payment Receipts admin screen and its Excel bulk-upload endpoint:
+// name, reg_no, license_no, specialization, email_address, purpose,
+// amount_paid.
+export function generateEngineerReceiptPdf(record) {
+  return new Promise((resolve, reject) => {
+    try {
+      const receiptNo  = `ERB/REN/${new Date().getFullYear()}/${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`
+      const safeReg    = String(record.reg_no || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')
+      const fileName   = `receipt_${safeReg}_${Date.now()}.pdf`
+      const filePath   = path.join(RECEIPT_PDF_DIR, fileName)
+
+      const doc = new PDFDocument({ size: 'A4', margin: 50 })
+      const stream = fs.createWriteStream(filePath)
+      doc.pipe(stream)
+
+      const contentLeft = doc.page.margins.left
+      const contentW    = doc.page.width - doc.page.margins.left - doc.page.margins.right
+
+      // ── Letterhead ────────────────────────────────────────────────
+      const headerTop = doc.y
+      if (fs.existsSync(LOGO_PATH)) {
+        try { doc.image(LOGO_PATH, contentLeft, headerTop, { height: 46 }) } catch { /* ignore bad image */ }
+      }
+      doc
+        .fillColor('#0f172a')
+        .fontSize(15).font('Helvetica-Bold')
+        .text('ENGINEERS REGISTRATION BOARD', contentLeft + 60, headerTop + 2, { width: contentW - 60 })
+        .fontSize(9).font('Helvetica').fillColor('#64748b')
+        .text('Management Support Unit Building, Plot 2 Gloucester Avenue, Kyambogo', contentLeft + 60, headerTop + 22, { width: contentW - 60 })
+
+      doc.moveDown(2.5)
+      doc.moveTo(contentLeft, doc.y).lineTo(contentLeft + contentW, doc.y).strokeColor('#ee1c24').lineWidth(2).stroke()
+      doc.moveDown(1)
+
+      // ── Title ─────────────────────────────────────────────────────
+      doc.fillColor('#ee1c24').fontSize(18).font('Helvetica-Bold')
+        .text('PAYMENT RECEIPT', { align: 'center' })
+      doc.moveDown(0.3)
+      doc.fillColor('#64748b').fontSize(10).font('Helvetica')
+        .text(`Receipt No: ${receiptNo}  ·  Date: ${new Date().toLocaleDateString('en-GB')}`, { align: 'center' })
+      doc.moveDown(1.5)
+
+      // ── Payee information ────────────────────────────────────────
+      doc.fillColor('#ee1c24').fontSize(10.5).font('Helvetica-Bold').text('PAYEE INFORMATION')
+      doc.moveDown(0.4)
+
+      const payeeRows = [
+        ['Name', String(record.name || '-').toUpperCase()],
+        ['Registration No', record.reg_no || '-'],
+        ['License No', record.license_no || '-'],
+        ['Specialization', String(record.specialization || '-').toUpperCase()],
+        ['Email Address', record.email_address || '-'],
+      ]
+      doc.font('Helvetica').fontSize(10.5)
+      for (const [label, value] of payeeRows) {
+        const rowY = doc.y
+        doc.fillColor('#64748b').font('Helvetica').fontSize(10)
+          .text(label, contentLeft, rowY, { width: contentW * 0.35 })
+        doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(10)
+          .text(String(value), contentLeft + contentW * 0.35, rowY, { width: contentW * 0.65 })
+        doc.moveDown(0.5)
+      }
+
+      doc.moveDown(1)
+
+      // ── Payment breakdown ────────────────────────────────────────
+      doc.fillColor('#ee1c24').fontSize(10.5).font('Helvetica-Bold').text('PAYMENT BREAKDOWN')
+      doc.moveDown(0.4)
+
+      const tableTop = doc.y
+      doc.rect(contentLeft, tableTop, contentW, 22).fill('#f5f5f5')
+      doc.fillColor('#0f172a').fontSize(9.5).font('Helvetica-Bold')
+        .text('Description', contentLeft + 8, tableTop + 6, { width: contentW * 0.6 })
+        .text('Amount (UGX)', contentLeft + contentW * 0.6, tableTop + 6, { width: contentW * 0.4 - 8, align: 'right' })
+
+      const itemTop = tableTop + 22
+      doc.fillColor('#0f172a').font('Helvetica').fontSize(9.5)
+        .text(record.purpose || '-', contentLeft + 8, itemTop + 6, { width: contentW * 0.6 })
+        .text(fmtUGX(record.amount_paid), contentLeft + contentW * 0.6, itemTop + 6, { width: contentW * 0.4 - 8, align: 'right' })
+
+      const totalTop = itemTop + 26
+      doc.rect(contentLeft, totalTop, contentW, 24).fill('#ee1c24')
+      doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(10.5)
+        .text('TOTAL AMOUNT PAID', contentLeft + 8, totalTop + 7, { width: contentW * 0.6 })
+        .text(fmtUGX(record.amount_paid), contentLeft + contentW * 0.6, totalTop + 7, { width: contentW * 0.4 - 8, align: 'right' })
+
+      doc.y = totalTop + 24 + 24
+
+      // ── Footer ────────────────────────────────────────────────────
+      const footerY = doc.page.height - doc.page.margins.bottom - 30
+      doc.moveTo(contentLeft, footerY).lineTo(contentLeft + contentW, footerY).strokeColor('#e2e8f0').lineWidth(1).stroke()
+      doc.fillColor('#94a3b8').fontSize(8).font('Helvetica')
+        .text('This is an official receipt for license renewal fees paid to the Engineers Registration Board.',
+          contentLeft, footerY + 8, { width: contentW, align: 'center' })
+        .text('For inquiries: info@erb.go.ug | Tel: +256-393-194-942',
+          contentLeft, footerY + 18, { width: contentW, align: 'center' })
+
+      doc.end()
+
+      stream.on('finish', () => resolve(filePath))
+      stream.on('error', reject)
+    } catch (err) {
+      reject(err)
+    }
+  })
+}
+
