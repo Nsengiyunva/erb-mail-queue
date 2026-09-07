@@ -174,6 +174,45 @@ router.get('/:id', async (req, res) => {
 
 // ── OPTIONS ───────────────────────────────────────────────────────
 router.options('/send-invoice', cors(corsOptions), (_req, res) => res.sendStatus(204))
+router.options('/:id/resend', cors(corsOptions), (_req, res) => res.sendStatus(204))
+
+// ── POST /:id/resend — requeue an existing invoice email (e.g. after a failure) ──
+router.post('/:id/resend', async (req, res) => {
+  try {
+    const invoice = await Invoice.findByPk(req.params.id)
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found' })
+
+    if (!invoice.email) {
+      return res.status(400).json({ message: 'This invoice has no email address on file' })
+    }
+    if (!invoice.file_path || !fs.existsSync(invoice.file_path)) {
+      return res.status(400).json({
+        message: 'The original invoice PDF is no longer available on the server. Please regenerate and send the invoice again.',
+      })
+    }
+
+    await invoice.update({ status: 'pending' })
+
+    await invoiceQueue.add('send-invoice',
+      {
+        invoiceId:     invoice.id,
+        email:         invoice.email,
+        filePath:      invoice.file_path,
+        originalName:  invoice.original_name,
+        invoiceNo:     invoice.invoice_no,
+        engineerName:  invoice.engineer_name,
+        financialYear: invoice.financial_year,
+        totalAmount:   invoice.total_amount,
+      },
+      { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
+    )
+
+    res.json({ message: 'Invoice queued for resending', invoice })
+  } catch (error) {
+    console.error('Invoice resend failed:', error)
+    res.status(500).json({ message: 'Failed to resend invoice' })
+  }
+})
 
 // ── POST /send-invoice — upload PDF + email it to the engineer ───
 router.post('/send-invoice', upload.single('file'), async (req, res) => {
