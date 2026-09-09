@@ -1421,6 +1421,110 @@ router.get("/:id", async (req, res) => {
   }
 });
 
+// ── Shared core: payment-stage verify / defer ──────────────────────
+// Used by both the single-application routes below (POST /accounts_verify,
+// /accounts_defer) and their bulk counterparts (POST /accounts_verify_bulk,
+// /accounts_defer_bulk) for the Payment Review checkbox-select UI — the
+// eligibility check, status transition, and side effects (receipt email /
+// sent-back email) only live here, once.
+async function verifyApplicationPayment(applicationID, { comment, verified_by }) {
+  if (!applicationID || !comment || !comment.trim()) {
+    const err = new Error("applicationID and a comment are both required");
+    err.status = 400;
+    throw err;
+  }
+
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) {
+    const err = new Error("Application not found");
+    err.status = 404;
+    throw err;
+  }
+
+  const raw = application.toJSON();
+  const effective = computeEffectiveStatus(raw);
+
+  if (effective.status !== "SPONSOR_APPROVED") {
+    const err = new Error(`This application isn't awaiting payment verification (current status: ${effective.status}).`);
+    err.status = 400;
+    throw err;
+  }
+
+  await application.update({
+    status:               "ACCOUNTS_APPROVED",
+    sponsors:              effective.sponsors, // carries the sponsor-signed correction, if any, atomically
+    accounts_comment:      comment.trim(),
+    accounts_verified_by:  verified_by || "Admin",
+    accounts_verified_at:  new Date(),
+  });
+
+  // Best-effort, non-blocking — the caller's response has already been
+  // decided by the time this settles, so a failure here (bad email, PDF
+  // generation, mail transport down) is only ever logged, never surfaced
+  // as an error on the verification action itself.
+  sendAccountsVerificationReceipt(application).catch(err =>
+    console.error(`[accounts_verify] receipt email failed for application ${applicationID}:`, err.message)
+  );
+
+  return { application_status: application.status };
+}
+
+async function deferApplicationForPayment(applicationID, { comment, deferred_by }) {
+  if (!applicationID || !comment || !comment.trim()) {
+    const err = new Error("applicationID and a comment are both required");
+    err.status = 400;
+    throw err;
+  }
+
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) {
+    const err = new Error("Application not found");
+    err.status = 404;
+    throw err;
+  }
+
+  const raw = application.toJSON();
+  const effective = computeEffectiveStatus(raw);
+
+  if (effective.status !== "SPONSOR_APPROVED") {
+    const err = new Error(`This application isn't awaiting payment verification, so it can't be deferred here (current status: ${effective.status}).`);
+    err.status = 400;
+    throw err;
+  }
+
+  await application.update({
+    status:         "DEFERRED",
+    sponsors:       effective.sponsors,
+    defer_comment:  comment.trim(),
+    deferred_by:    deferred_by || "Admin",
+    deferred_at:    new Date(),
+  });
+
+  try {
+    await applicationStatusEmailQueue.add(
+      "application-deferred-email",
+      {
+        type:            "SENT_BACK",
+        to:              raw.email_address,
+        applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        trackingNumber:  trackingNumber(application.id),
+        applicationType: raw.type,
+        reason:          comment.trim(),
+      },
+      {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      }
+    );
+  } catch (emailQueueError) {
+    console.error(`Failed to queue application-sent-back email for application ${applicationID} (accounts defer was still recorded):`, emailQueueError);
+  }
+
+  return { application_status: application.status };
+}
+
 // ── POST /accounts_verify ────────────────────────────────────────
 // New payment-verification stage, sitting between sponsor approval and
 // board review: an Accounts-level admin confirms the applicant has
@@ -1428,50 +1532,61 @@ router.get("/:id", async (req, res) => {
 // GET /registry) before the file goes to the Board. Requires a comment
 // for the record, same pattern as /board_approve.
 router.post("/accounts_verify", async (req, res) => {
+  const { applicationID, comment, verified_by } = req.body || {};
   try {
-    const { applicationID, comment, verified_by } = req.body || {};
-
-    if (!applicationID || !comment || !comment.trim()) {
-      return res.status(400).json({ message: "applicationID and a comment are both required" });
-    }
-
-    const application = await Application.findOne({ where: { id: applicationID } });
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
-
-    const raw = application.toJSON();
-    const effective = computeEffectiveStatus(raw);
-
-    if (effective.status !== "SPONSOR_APPROVED") {
-      return res.status(400).json({
-        message: `This application isn't awaiting payment verification (current status: ${effective.status}).`,
-      });
-    }
-
-    await application.update({
-      status:               "ACCOUNTS_APPROVED",
-      sponsors:              effective.sponsors, // carries the sponsor-signed correction, if any, atomically
-      accounts_comment:      comment.trim(),
-      accounts_verified_by:  verified_by || "Admin",
-      accounts_verified_at:  new Date(),
-    });
-
-    // Best-effort, non-blocking — the response below has already been
-    // decided, so a failure here (bad email, PDF generation, mail
-    // transport down) is only ever logged, never surfaces as an error on
-    // the verification action itself.
-    sendAccountsVerificationReceipt(application).catch(err =>
-      console.error("[accounts_verify] receipt email failed:", err.message)
-    );
-
+    const result = await verifyApplicationPayment(applicationID, { comment, verified_by });
     return res.status(200).json({
       message: "Payment verified — application forwarded to the Board for review",
-      application_status: application.status,
+      ...result,
     });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
     console.error("Failed to record accounts verification:", error);
     return res.status(500).json({ message: "Failed to verify payment for this application" });
+  }
+});
+
+// ── POST /accounts_verify_bulk ────────────────────────────────────
+// Bulk version of /accounts_verify for the Payment Review checkbox-select
+// UI on Pending Applications: one comment applied to every selected
+// application. Processed sequentially (not parallel) — keeps load on the
+// receipt-email pipeline and DB predictable for a page that could
+// realistically have dozens selected — and returns a per-application
+// result so the frontend can show exactly which ones went through rather
+// than an all-or-nothing outcome (e.g. one might have moved on to another
+// stage since the page was loaded).
+router.post("/accounts_verify_bulk", async (req, res) => {
+  try {
+    const { applicationIDs, comment, verified_by } = req.body || {};
+
+    if (!Array.isArray(applicationIDs) || applicationIDs.length === 0) {
+      return res.status(400).json({ message: "Select at least one application" });
+    }
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ message: "Please add a comment before approving" });
+    }
+    if (applicationIDs.length > 200) {
+      return res.status(400).json({ message: "Please select 200 applications or fewer at a time" });
+    }
+
+    const results = [];
+    for (const applicationID of applicationIDs) {
+      try {
+        await verifyApplicationPayment(applicationID, { comment, verified_by });
+        results.push({ applicationID, ok: true });
+      } catch (err) {
+        results.push({ applicationID, ok: false, message: err.message || "Failed to verify" });
+      }
+    }
+
+    const succeeded = results.filter(r => r.ok).length;
+    return res.status(200).json({
+      message: `${succeeded} of ${results.length} application(s) approved and forwarded to the Board`,
+      results,
+    });
+  } catch (error) {
+    console.error("Failed to record bulk accounts verification:", error);
+    return res.status(500).json({ message: "Failed to process bulk payment verification" });
   }
 });
 
@@ -1483,64 +1598,56 @@ router.post("/accounts_verify", async (req, res) => {
 // there's no difference between the two; this only differs in which
 // stage sent it back, recorded here for the audit trail.
 router.post("/accounts_defer", async (req, res) => {
+  const { applicationID, comment, deferred_by } = req.body || {};
   try {
-    const { applicationID, comment, deferred_by } = req.body || {};
-
-    if (!applicationID || !comment || !comment.trim()) {
-      return res.status(400).json({ message: "applicationID and a comment are both required" });
-    }
-
-    const application = await Application.findOne({ where: { id: applicationID } });
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
-
-    const raw = application.toJSON();
-    const effective = computeEffectiveStatus(raw);
-
-    if (effective.status !== "SPONSOR_APPROVED") {
-      return res.status(400).json({
-        message: `This application isn't awaiting payment verification, so it can't be deferred here (current status: ${effective.status}).`,
-      });
-    }
-
-    await application.update({
-      status:         "DEFERRED",
-      sponsors:       effective.sponsors,
-      defer_comment:  comment.trim(),
-      deferred_by:    deferred_by || "Admin",
-      deferred_at:    new Date(),
-    });
-
-    try {
-      await applicationStatusEmailQueue.add(
-        "application-deferred-email",
-        {
-          type:            "SENT_BACK",
-          to:              raw.email_address,
-          applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
-          trackingNumber:  trackingNumber(application.id),
-          applicationType: raw.type,
-          reason:          comment.trim(),
-        },
-        {
-          attempts: 3,
-          backoff: { type: "exponential", delay: 5000 },
-          removeOnComplete: true,
-          removeOnFail: false,
-        }
-      );
-    } catch (emailQueueError) {
-      console.error("Failed to queue application-sent-back email (accounts defer was still recorded):", emailQueueError);
-    }
-
+    const result = await deferApplicationForPayment(applicationID, { comment, deferred_by });
     return res.status(200).json({
       message: "Application sent back to the applicant for payment",
-      application_status: application.status,
+      ...result,
     });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
     console.error("Failed to record accounts defer:", error);
     return res.status(500).json({ message: "Failed to defer application" });
+  }
+});
+
+// ── POST /accounts_defer_bulk ─────────────────────────────────────
+// Bulk version of /accounts_defer — same shape and semantics as
+// /accounts_verify_bulk above, one shared reason applied to every
+// selected application, per-application results returned.
+router.post("/accounts_defer_bulk", async (req, res) => {
+  try {
+    const { applicationIDs, comment, deferred_by } = req.body || {};
+
+    if (!Array.isArray(applicationIDs) || applicationIDs.length === 0) {
+      return res.status(400).json({ message: "Select at least one application" });
+    }
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ message: "Please add a comment explaining why these are being sent back" });
+    }
+    if (applicationIDs.length > 200) {
+      return res.status(400).json({ message: "Please select 200 applications or fewer at a time" });
+    }
+
+    const results = [];
+    for (const applicationID of applicationIDs) {
+      try {
+        await deferApplicationForPayment(applicationID, { comment, deferred_by });
+        results.push({ applicationID, ok: true });
+      } catch (err) {
+        results.push({ applicationID, ok: false, message: err.message || "Failed to defer" });
+      }
+    }
+
+    const succeeded = results.filter(r => r.ok).length;
+    return res.status(200).json({
+      message: `${succeeded} of ${results.length} application(s) sent back to the applicant`,
+      results,
+    });
+  } catch (error) {
+    console.error("Failed to record bulk accounts defer:", error);
+    return res.status(500).json({ message: "Failed to process bulk defer" });
   }
 });
 
