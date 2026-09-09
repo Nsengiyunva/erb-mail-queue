@@ -1229,7 +1229,7 @@ router.get("/registry", async (req, res) => {
     // ── Payment lookup ─────────────────────────────────────────────
     const appIds = rows.map((r) => String(r.id));
     const payments = appIds.length
-      ? await PaymentTransaction.findAll({ where: { application_id: { [Op.in]: appIds } } })
+      ? await PaymentTransaction.findAll({ where: { application_id: { [Op.in]: appIds }, status: { [Op.ne]: "DELETED" } } })
       : [];
 
     // Keep only the most recent transaction per application (an applicant
@@ -1382,7 +1382,7 @@ router.get("/:id", async (req, res) => {
     // why accounts_verified_at overrides whatever the underlying
     // PaymentTransaction (or lack of one) says.
     const latestPayment = await PaymentTransaction.findOne({
-      where: { application_id: String(raw.id) },
+      where: { application_id: String(raw.id), status: { [Op.ne]: "DELETED" } },
       order: [["updatedAt", "DESC"]],
     });
     const accountsConfirmedPaid = !!raw.accounts_verified_at;

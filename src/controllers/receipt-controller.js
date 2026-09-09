@@ -1,5 +1,5 @@
 import { sequelize } from '../config/database.js'
-import { DataTypes } from 'sequelize'
+import { DataTypes, Op } from 'sequelize'
 import fs             from 'fs'
 import path            from 'path'
 import { Application }      from '../models/index.js'
@@ -41,6 +41,14 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   renewal_reviewed_by:    { type: DataTypes.STRING(200) },
   renewal_reviewed_at:    { type: DataTypes.DATE },
   renewal_review_comment: { type: DataTypes.TEXT },
+  // ── Added for admin-initiated manual status changes on the Payment
+  // Tracker (Success / Failed / Deleted) ──────────────────────────
+  // Distinct from renewal_reviewed_by/at above (which is specific to the
+  // renewal-approval workflow) — this covers a direct status override on
+  // any transaction, of any purpose, from the Payment Tracker admin UI.
+  status_changed_by:      { type: DataTypes.STRING(200) },
+  status_changed_at:      { type: DataTypes.DATE },
+  status_change_reason:   { type: DataTypes.TEXT },
   // ── Added for the SUCCESS → PDF receipt → email pipeline ────────
   // Tracks the *emailing* of the system-generated PDF receipt, separately
   // from `status` (which tracks the payment itself). payment_receipt_worker.js
@@ -196,7 +204,7 @@ export async function sendAccountsVerificationReceipt(application) {
   // receipt (payment_receipt_path) when the applicant never went through
   // either of those paths.
   const payment = await PaymentTransaction.findOne({
-    where: { application_id: String(raw.id) },
+    where: { application_id: String(raw.id), status: { [Op.ne]: 'DELETED' } },
     order: [['updatedAt', 'DESC']],
   })
 

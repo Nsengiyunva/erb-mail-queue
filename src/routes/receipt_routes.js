@@ -5,10 +5,10 @@ import path          from 'path'
 import cors          from 'cors'
 import { sequelize } from '../config/database.js'
 import ReceiptModel  from '../models/Receipt.js'
-import { DataTypes } from 'sequelize'
+import { DataTypes, Op } from 'sequelize'
 import receiptQueue  from '../queues/receipt_queue.js'
 
-import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalApprovedReceipt, sendRenewalRejectedNotice } from '../controllers/receipt-controller.js'
+import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalApprovedReceipt, sendRenewalRejectedNotice, maybeSendReceiptEmail } from '../controllers/receipt-controller.js'
 import { parseReceiptWorkbook }        from '../utils/receipt-excel.js'
 import { generateEngineerReceiptPdf }  from '../utils/receipt-pdf.js'
 
@@ -147,6 +147,9 @@ router.post('/renewal-payment', upload.single('receipt'), submitReceiptPayment)
 // ── GET /transactions ─────────────────────────────────────────────
 // Admin: returns all transactions (most recent first, paginated).
 // Applicant: returns only their own rows (filtered by applicant_id).
+// Deleted transactions (see POST /transactions/:id/status) are excluded
+// for everyone — deleting one is meant to make it disappear entirely,
+// not just hide it from the applicant.
 router.get('/transactions', async (req, res) => {
   try {
     const role        = (req.headers['x-user-role']  || '').toUpperCase()
@@ -155,9 +158,10 @@ router.get('/transactions', async (req, res) => {
     const ADMIN_ROLES = ['REGISTRAR', 'CHAIRMAN', 'ACCOUNTS', 'REGISTRATION']
     const isAdmin     = ADMIN_ROLES.includes(role)
 
+    const baseWhere   = { status: { [Op.ne]: 'DELETED' } }
     const whereClause = isAdmin
-      ? {}
-      : { applicant_id: parseInt(applicantId, 10) || -1 }
+      ? baseWhere
+      : { ...baseWhere, applicant_id: parseInt(applicantId, 10) || -1 }
 
     const rows = await PaymentTransaction.findAll({
       where: whereClause,
@@ -183,11 +187,72 @@ router.post('/transactions/:id/retry', async (req, res) => {
     if (!tx) return res.status(404).json({ message: 'Transaction not found' })
     if (tx.status === 'SUCCESS')
       return res.status(400).json({ message: 'Transaction already succeeded — no retry needed' })
+    if (tx.status === 'DELETED')
+      return res.status(400).json({ message: 'This transaction has been deleted and cannot be retried' })
     await tx.update({ status: 'INITIATED' })
     return res.json({ message: 'Transaction reset to INITIATED', id })
   } catch (err) {
     console.error('[POST /transactions/retry]', err.message)
     return res.status(500).json({ message: 'Failed to reset transaction' })
+  }
+})
+
+// ── POST /transactions/:id/status ─────────────────────────────────
+// Admin-only: directly overrides a transaction's status — Success,
+// Failed, or Deleted — from the Payment Tracker. Distinct from the
+// renewal_status review workflow above (POST /renewals/:id/approve|reject),
+// which is specific to renewal payments and drives the "official" renewal
+// decision; this is a blunter, general-purpose correction tool for any
+// transaction of any purpose (e.g. a payment that actually went through
+// but the MoMo callback never landed, a duplicate/erroneous record that
+// should be removed, etc).
+//
+// Marking SUCCESS fires the same receipt-email pipeline as any other
+// confirmed payment (maybeSendReceiptEmail), so the applicant still gets
+// their receipt even though this is a manual override, not a system
+// confirmation. Marking DELETED makes the row disappear from GET
+// /transactions and GET /renewals for everyone (admin included) — there
+// is currently no "show deleted" view, so treat this as effectively
+// permanent from the UI's perspective.
+router.post('/transactions/:id/status', async (req, res) => {
+  try {
+    const role = (req.headers['x-user-role'] || '').toUpperCase()
+    const ADMIN_ROLES = ['REGISTRAR', 'CHAIRMAN', 'ACCOUNTS', 'REGISTRATION']
+    if (!ADMIN_ROLES.includes(role)) {
+      return res.status(403).json({ message: 'Only admin staff can change a payment status directly.' })
+    }
+
+    const { id } = req.params
+    const { status, changed_by, reason } = req.body || {}
+    const ALLOWED = ['SUCCESS', 'FAILED', 'DELETED']
+    const normalized = String(status || '').toUpperCase()
+
+    if (!ALLOWED.includes(normalized)) {
+      return res.status(400).json({ message: `Status must be one of: ${ALLOWED.join(', ')}` })
+    }
+
+    const tx = await PaymentTransaction.findByPk(id)
+    if (!tx) return res.status(404).json({ message: 'Transaction not found' })
+
+    await tx.update({
+      status:                normalized,
+      status_changed_by:     changed_by || 'Admin',
+      status_changed_at:     new Date(),
+      status_change_reason:  reason?.trim() || null,
+    })
+
+    // Best-effort, non-blocking — the status change itself is already
+    // recorded above regardless of whether the email succeeds.
+    if (normalized === 'SUCCESS') {
+      maybeSendReceiptEmail(tx, { email: tx.email }).catch(err =>
+        console.error('[transactions/status] receipt email failed:', err.message)
+      )
+    }
+
+    return res.status(200).json({ message: `Transaction marked ${normalized}`, id: tx.id, status: normalized })
+  } catch (err) {
+    console.error('[POST /transactions/:id/status]', err.message)
+    return res.status(500).json({ message: 'Failed to update transaction status' })
   }
 })
 
@@ -228,6 +293,7 @@ router.get('/renewals', async (req, res) => {
     const status = (req.query.status || '').trim().toUpperCase()
     const where  = {
       purpose: 'RENEWAL',
+      status:  { [Op.ne]: 'DELETED' }, // deleted transactions are hidden everywhere, not just the general tracker
       ...(status && status !== 'ALL' ? { renewal_status: status } : {}),
     }
 
@@ -237,11 +303,12 @@ router.get('/renewals', async (req, res) => {
       limit: 500,
     })
 
+    const notDeleted = { status: { [Op.ne]: 'DELETED' } }
     const [all, pending, approved, rejected] = await Promise.all([
-      PaymentTransaction.count({ where: { purpose: 'RENEWAL' } }),
-      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'PENDING' } }),
-      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'APPROVED' } }),
-      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'REJECTED' } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', ...notDeleted } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'PENDING', ...notDeleted } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'APPROVED', ...notDeleted } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'REJECTED', ...notDeleted } }),
     ])
 
     return res.json({
