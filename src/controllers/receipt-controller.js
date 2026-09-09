@@ -149,6 +149,108 @@ export async function maybeSendReceiptEmail(record, { email } = {}) {
   }
 }
 
+// ── Accounts-verification → PDF receipt → email ─────────────────────
+// Triggered by POST /accounts_verify (application_routes.js) the moment
+// an Accounts-level admin confirms an applicant's payment. This is the
+// one place every accounts-approved application passes through,
+// regardless of how the money actually got here — so it's the right
+// place to guarantee a receipt goes out, rather than relying only on
+// maybeSendReceiptEmail (which only ever fires off a *system-confirmed*
+// SUCCESS: a real FlexiPay callback, or the instant "Attach Receipt"
+// flow — neither of which covers an application-fee receipt attached
+// directly at submission time and manually checked by Accounts).
+export async function sendAccountsVerificationReceipt(application) {
+  if (!application) return
+  const raw = typeof application.toJSON === 'function' ? application.toJSON() : application
+
+  const email = raw.email_address
+  if (!email) {
+    console.error(`[accounts-verify-receipt] No email on file for application ${raw.id} — skipping receipt`)
+    return
+  }
+
+  const applicantName = raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(' ')
+
+  // Prefer a real PaymentTransaction row (a FlexiPay attempt, or the
+  // instant "Attach Receipt" flow) if one exists — it carries the actual
+  // amount/provider/ref. Falls back to the application's own attached
+  // receipt (payment_receipt_path) when the applicant never went through
+  // either of those paths.
+  const payment = await PaymentTransaction.findOne({
+    where: { application_id: String(raw.id) },
+    order: [['updatedAt', 'DESC']],
+  })
+
+  if (payment) {
+    // Accounts has now manually confirmed this payment — send the
+    // standard receipt pipeline through as SUCCESS regardless of what
+    // the underlying attempt's own status says (e.g. a FlexiPay attempt
+    // that failed, but the applicant paid by another means Accounts
+    // could verify). This does NOT rewrite payment.status itself — the
+    // Payment Tracker should keep showing what actually happened to that
+    // attempt; only the receipt/email pipeline is forced through here.
+    if (payment.receipt_email_status === 'QUEUED' || payment.receipt_email_status === 'SENT') return
+    await maybeSendReceiptEmail(
+      { ...payment.toJSON(), status: 'SUCCESS', applicant_name: payment.applicant_name || applicantName },
+      { email }
+    )
+    return
+  }
+
+  if (!raw.payment_receipt_path) {
+    console.error(`[accounts-verify-receipt] No payment record or attached receipt for application ${raw.id} — skipping receipt`)
+    return
+  }
+
+  if (raw.accounts_receipt_email_status === 'QUEUED' || raw.accounts_receipt_email_status === 'SENT') return
+
+  // Claim it immediately, same reasoning as maybeSendReceiptEmail above.
+  await Application.update(
+    { accounts_receipt_email_status: 'QUEUED' },
+    { where: { id: raw.id } }
+  )
+
+  const syntheticRef = `ERB-${raw.id}-ACCTVERIFIED`
+
+  try {
+    const filePath = await generateReceiptPdf({
+      transaction_ref: syntheticRef,
+      application_id:  raw.id,
+      applicant_name:  applicantName,
+      amount:          null, // no confirmed amount on file for a directly-attached receipt
+      provider:        null,
+      phone:            raw.telephone || raw.registered_phone_number || raw.provided_number,
+      purpose:          'APPLICATION',
+      payment_method:   'RECEIPT',
+      status:           'SUCCESS',
+      updatedAt:        raw.accounts_verified_at || new Date(),
+    })
+
+    await paymentReceiptQueue.add(
+      'send-payment-receipt',
+      {
+        transactionRef: syntheticRef,
+        email,
+        filePath,
+        applicantName,
+        amount:  null,
+        purpose: 'APPLICATION',
+        // Tells the worker to confirm via Application.accounts_receipt_email_status
+        // instead of PaymentTransaction.receipt_email_status — there's no
+        // PaymentTransaction row for this one.
+        applicationId: raw.id,
+      },
+      { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
+    )
+  } catch (err) {
+    console.error(`[accounts-verify-receipt] Failed for application ${raw.id}:`, err.message)
+    await Application.update(
+      { accounts_receipt_email_status: 'FAILED' },
+      { where: { id: raw.id } }
+    ).catch(() => {})
+  }
+}
+
 // ── Controller ────────────────────────────────────────────────────
 export const saveTransaction = async (req, res) => {
   const {

@@ -67,16 +67,10 @@ app.use(cors(corsOptions));
 app.options("/{*path}", cors(corsOptions));
 
 // ── Body parsers ──────────────────────────────────────────────────
-// Default express.json() limit is 100kb. The application wizard now
-// autosaves the full draft (education/engineering/training/positions/
-// membership/sponsors, all JSON-stringified) on every step, which can
-// exceed that easily — and when it does, express.json() silently skips
-// parsing rather than erroring, leaving req.body undefined downstream.
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // ── HTTPS redirect — x-forwarded-proto only, never req.protocol ──
-// req.protocol is always 'http' behind nginx, causing an infinite loop.
 app.use((req, res, next) => {
   if (req.headers["x-forwarded-proto"] === "http") {
     return res.redirect(301, `https://${req.headers.host}${req.url}`);
@@ -139,7 +133,6 @@ app.use("/api/erb/application", applicationRoutes);
 app.use("/api/erb/invoice",     invoiceRoutes);
 
 // ── Payment-update webhook (called by VM1 payment watcher) ───────
-// Placed here so it has direct access to `io` without circular imports.
 const WATCHER_SECRET = 'bnNlbmdpeXVudmE6a2luZ0AjMjAyME5TRQ==';
 
 
@@ -176,12 +169,6 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
     } else {
       console.log(`[payment-update] DB updated ${request_id} → ${dbStatus} (${affected} row)`);
 
-      // This is the real "the applicant successfully paid" signal — the
-      // watcher only calls this once it has confirmed the Mobile Money
-      // payment actually went through. Generate the official PDF receipt
-      // and queue it for email. Re-fetch so maybeSendReceiptEmail sees the
-      // row with the status/amount just written above (the `affected`
-      // count from .update() doesn't give us the row itself).
       if (dbStatus === "SUCCESS") {
         const record = await PaymentTransaction.findOne({ where: { transaction_ref: String(request_id) } });
         maybeSendReceiptEmail(record).catch(err =>
@@ -234,7 +221,6 @@ io.on("connection", (socket) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────
-// Use httpServer.listen, NOT app.listen — otherwise socket.io won't work.
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on port ${PORT}`);
 });

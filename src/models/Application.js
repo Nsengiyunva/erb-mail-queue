@@ -64,6 +64,15 @@ export default (sequelize, DataTypes) => {
       accounts_comment:                 DataTypes.TEXT,
       accounts_verified_by:             DataTypes.STRING,
       accounts_verified_at:             DataTypes.DATE,
+      // Tracks the "payment verified" confirmation-receipt email fired by
+      // /accounts_verify (see sendAccountsVerificationReceipt in
+      // receipt-controller.js) for applications that have no matching
+      // PaymentTransaction row — i.e. the applicant attached a receipt
+      // directly at submission time (payment_receipt_path) rather than
+      // paying via FlexiPay or the instant "Attach Receipt" flow. Mirrors
+      // payment_transactions.receipt_email_status, which is used instead
+      // whenever a PaymentTransaction row does exist.
+      accounts_receipt_email_status:    DataTypes.STRING(20), // null | 'QUEUED' | 'SENT' | 'FAILED'
       // Populated when a Registration-level admin defers an application
       // back to the applicant for updates instead of approving it (see
       // /defer). Mirrors the board_* fields above but for the other

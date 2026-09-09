@@ -12,6 +12,13 @@ const EmailLog = EmailLogModel(sequelize, Sequelize.DataTypes);
 const Application = ApplicationModel(sequelize, Sequelize.DataTypes); // ← add this
 const OldUser = OldUserModel(sequelize, Sequelize.DataTypes);
 
+// Adds accounts_receipt_email_status to erb_applications if it isn't there
+// yet (same self-healing-schema pattern as PaymentTransaction.sync() in
+// receipt-controller.js) — only ever ADDS columns, never drops/renames.
+Application.sync({ alter: true }).catch(err =>
+  console.error('[Application] sync error:', err.message)
+);
+
 // Associations
 FileBatch.hasMany(ProcessedFile, { foreignKey: 'batchId' });
 ProcessedFile.belongsTo(FileBatch, { foreignKey: 'batchId' });

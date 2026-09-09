@@ -5,6 +5,7 @@ import { sequelize } from "../config/database.js";
 import { DataTypes }  from "sequelize";
 import { sendStyledMail } from "../utils/mailer.js";
 import { PaymentTransaction } from "../controllers/receipt-controller.js";
+import { Application } from "../models/index.js";
 
 const fmtUGX = (n) =>
   n == null ? "-" : `${Number(n).toLocaleString("en-UG", { maximumFractionDigits: 0 })} UGX`;
@@ -25,6 +26,7 @@ const worker = new Worker(
       applicantName,
       amount,
       purpose,
+      applicationId, // set only for the accounts-verification / no-PaymentTransaction path
     } = job.data;
 
     try {
@@ -81,17 +83,31 @@ const worker = new Worker(
       );
 
       // 4️⃣ Mark as sent
-      await PaymentTransaction.update(
-        { receipt_email_status: "SENT" },
-        { where: { transaction_ref: transactionRef } }
-      );
+      if (applicationId) {
+        await Application.update(
+          { accounts_receipt_email_status: "SENT" },
+          { where: { id: applicationId } }
+        );
+      } else {
+        await PaymentTransaction.update(
+          { receipt_email_status: "SENT" },
+          { where: { transaction_ref: transactionRef } }
+        );
+      }
 
       return { transactionRef };
     } catch (error) {
-      await PaymentTransaction.update(
-        { receipt_email_status: "FAILED" },
-        { where: { transaction_ref: transactionRef } }
-      );
+      if (applicationId) {
+        await Application.update(
+          { accounts_receipt_email_status: "FAILED" },
+          { where: { id: applicationId } }
+        );
+      } else {
+        await PaymentTransaction.update(
+          { receipt_email_status: "FAILED" },
+          { where: { transaction_ref: transactionRef } }
+        );
+      }
       throw error; // let BullMQ retry
     }
   },

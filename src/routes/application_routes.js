@@ -400,7 +400,7 @@ import ApplicationModel from "../models/Application.js";
 import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
-import { PaymentTransaction, normaliseStatus } from "../controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt } from "../controllers/receipt-controller.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
@@ -1246,6 +1246,17 @@ router.get("/registry", async (req, res) => {
       const raw     = row.toJSON();
       const payment = latestPaymentByApp[String(raw.id)];
       const effective = deriveEffectiveStatus(row, raw);
+
+      // Accounts has manually confirmed payment for every application that
+      // has passed the /accounts_verify stage — accounts_verified_at is
+      // only ever set there. From that point on the Payment column should
+      // read "Paid" regardless of what the underlying PaymentTransaction
+      // (or lack of one) says, since Accounts may have confirmed the
+      // payment through means the automated pipeline never saw (cash, a
+      // manually-checked receipt, a failed FlexiPay attempt paid another
+      // way, etc).
+      const accountsConfirmedPaid = !!raw.accounts_verified_at;
+
       return {
         id:                raw.id,
         applicant_name:    raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" ") || "(unnamed draft)",
@@ -1257,9 +1268,11 @@ router.get("/registry", async (req, res) => {
         // but the applicant may instead have attached a payment receipt
         // (see payment_receipt_path / TITLE_COLUMN_MAP "payment receipt"),
         // which is an equally valid proof of payment.
-        payment_status:    payment
-          ? normaliseStatus(payment.status)
-          : (raw.payment_receipt_path ? "RECEIPT_UPLOADED" : "NOT_PAID"),
+        payment_status:    accountsConfirmedPaid
+          ? "SUCCESS"
+          : payment
+            ? normaliseStatus(payment.status)
+            : (raw.payment_receipt_path ? "RECEIPT_UPLOADED" : "NOT_PAID"),
         // How the applicant paid (or intends to), independent of whether
         // it's actually confirmed yet — lets accounts tell "paid via
         // FlexiPay" apart from "uploaded a receipt to verify manually"
@@ -1268,6 +1281,16 @@ router.get("/registry", async (req, res) => {
           ? "ONLINE"
           : (raw.payment_receipt_path ? "RECEIPT" : null),
         amount:            payment?.amount ?? null,
+        // Only meaningful for the ONLINE mode above (a real
+        // PaymentTransaction row) — the applicant's own FlexiPay reference.
+        transaction_id:    payment?.transaction_ref ?? null,
+        // Best available "date of payment": when we have a PaymentTransaction
+        // row, its own last-updated time (i.e. when it last changed status);
+        // otherwise, for a directly-attached receipt Accounts has since
+        // confirmed, fall back to when Accounts verified it.
+        payment_date:      payment
+          ? (payment.updatedAt || payment.createdAt)
+          : (accountsConfirmedPaid ? raw.accounts_verified_at : null),
         submitted_at:      raw.updated_at || raw.created_at,
       };
     });
@@ -1355,10 +1378,33 @@ router.get("/:id", async (req, res) => {
 
     const effective = deriveEffectiveStatus(application, raw);
 
+    // Same payment enrichment as GET /registry — see the comment there for
+    // why accounts_verified_at overrides whatever the underlying
+    // PaymentTransaction (or lack of one) says.
+    const latestPayment = await PaymentTransaction.findOne({
+      where: { application_id: String(raw.id) },
+      order: [["updatedAt", "DESC"]],
+    });
+    const accountsConfirmedPaid = !!raw.accounts_verified_at;
+    const paymentInfo = {
+      payment_status: accountsConfirmedPaid
+        ? "SUCCESS"
+        : latestPayment
+          ? normaliseStatus(latestPayment.status)
+          : (raw.payment_receipt_path ? "RECEIPT_UPLOADED" : "NOT_PAID"),
+      payment_mode: latestPayment ? "ONLINE" : (raw.payment_receipt_path ? "RECEIPT" : null),
+      amount: latestPayment?.amount ?? null,
+      transaction_id: latestPayment?.transaction_ref ?? null,
+      payment_date: latestPayment
+        ? (latestPayment.updatedAt || latestPayment.createdAt)
+        : (accountsConfirmedPaid ? raw.accounts_verified_at : null),
+    };
+
     return res.status(200).json({
       message: "Application fetched successfully",
       application: {
         ...raw,
+        ...paymentInfo,
         status:      effective.status,
         education:   parseCol(raw.education),
         engineering: parseCol(raw.engineering),
@@ -1410,6 +1456,14 @@ router.post("/accounts_verify", async (req, res) => {
       accounts_verified_by:  verified_by || "Admin",
       accounts_verified_at:  new Date(),
     });
+
+    // Best-effort, non-blocking — the response below has already been
+    // decided, so a failure here (bad email, PDF generation, mail
+    // transport down) is only ever logged, never surfaces as an error on
+    // the verification action itself.
+    sendAccountsVerificationReceipt(application).catch(err =>
+      console.error("[accounts_verify] receipt email failed:", err.message)
+    );
 
     return res.status(200).json({
       message: "Payment verified — application forwarded to the Board for review",
