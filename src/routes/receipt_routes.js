@@ -291,6 +291,21 @@ router.get('/uploads/:filename', (req, res) => {
 router.get('/renewals', async (req, res) => {
   try {
     const status = (req.query.status || '').trim().toUpperCase()
+
+    // Self-heal: any RENEWAL transaction with renewal_status still NULL
+    // predates the accounts-review workflow being added (it was created
+    // before that column existed / before saveTransaction started seeding
+    // it) — it was never actually reviewed, so it belongs in PENDING. Left
+    // as NULL, it matched neither the `renewal_status: 'PENDING'` filter
+    // below (SQL `= 'PENDING'` never matches NULL) nor the frontend
+    // modal's "show Approve/Reject" check — it just silently fell through
+    // both. Backfilling here is a cheap no-op once every row has been
+    // touched once.
+    await PaymentTransaction.update(
+      { renewal_status: 'PENDING' },
+      { where: { purpose: 'RENEWAL', renewal_status: null } }
+    )
+
     const where  = {
       purpose: 'RENEWAL',
       status:  { [Op.ne]: 'DELETED' }, // deleted transactions are hidden everywhere, not just the general tracker
