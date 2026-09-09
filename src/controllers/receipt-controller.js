@@ -5,6 +5,7 @@ import path            from 'path'
 import { Application }      from '../models/index.js'
 import { generateReceiptPdf } from '../utils/receipt-pdf.js'
 import paymentReceiptQueue    from '../queues/payment_receipt_queue.js'
+import { sendStyledMail }     from '../utils/mailer.js'
 
 // ── Model ─────────────────────────────────────────────────────────
 export const PaymentTransaction = sequelize.define('PaymentTransaction', {
@@ -22,6 +23,24 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   payment_method:      { type: DataTypes.STRING(20) },   // 'MOBILE' | 'RECEIPT'
   registration_number: { type: DataTypes.STRING(50) },
   receipt_path:        { type: DataTypes.STRING(255) },
+  // Applicant's email, captured at save time so downstream email pipelines
+  // (receipts, renewal approve/reject notices) don't have to guess it back
+  // out via Application lookups that may not exist for a renewal (renewals
+  // aren't tied to an erb_applications row the way the initial application
+  // fee is).
+  email:               { type: DataTypes.STRING(200) },
+  // ── Added for the accounts-reviewed renewal-payment workflow ────
+  // Only meaningful for purpose = 'RENEWAL'. Every online MoMo attempt or
+  // attached-receipt renewal payment starts PENDING and needs an Accounts
+  // reviewer to move it to APPROVED or REJECTED — see POST
+  // /renewals/:id/approve and /reject in receipt_routes.js. Deliberately
+  // separate from `status` above, which continues to reflect only the
+  // payment attempt's own outcome (MoMo success/failure, or "a receipt was
+  // attached"), not whether Accounts has actually signed off on it.
+  renewal_status:         { type: DataTypes.STRING(20) },  // null | 'PENDING' | 'APPROVED' | 'REJECTED'
+  renewal_reviewed_by:    { type: DataTypes.STRING(200) },
+  renewal_reviewed_at:    { type: DataTypes.DATE },
+  renewal_review_comment: { type: DataTypes.TEXT },
   // ── Added for the SUCCESS → PDF receipt → email pipeline ────────
   // Tracks the *emailing* of the system-generated PDF receipt, separately
   // from `status` (which tracks the payment itself). payment_receipt_worker.js
@@ -270,6 +289,14 @@ export const saveTransaction = async (req, res) => {
     // generic fallback.
     const resolvedPurpose = purpose || 'APPLICATION'
 
+    // Don't clobber an existing renewal_status on a resubmitted/duplicate
+    // save (e.g. a client-side retry of the exact same request) — only
+    // seed it the first time a RENEWAL transaction is created.
+    const existing = await PaymentTransaction.findOne({ where: { transaction_ref } })
+    const resolvedRenewalStatus = resolvedPurpose === 'RENEWAL'
+      ? (existing?.renewal_status || 'PENDING')
+      : (existing?.renewal_status ?? null)
+
     const [record] = await PaymentTransaction.upsert({
       application_id,
       transaction_ref,
@@ -282,6 +309,8 @@ export const saveTransaction = async (req, res) => {
       purpose: resolvedPurpose,
       payment_method,
       registration_number,
+      email:          email || existing?.email || null,
+      renewal_status: resolvedRenewalStatus,
     })
 
     res.json({ saved: true })
@@ -303,21 +332,22 @@ export const saveTransaction = async (req, res) => {
 // One-shot "instant payment" endpoint for the Renewal screen's
 // "Attach Receipt" path: the frontend only calls this once the user
 // clicks the final Submit button (not on file-select), so this both
-// stores the receipt AND immediately marks the transaction SUCCESS —
-// there is no separate pending-review step for this path, per the
-// product decision that an attached receipt is itself the applicant's
-// declaration of a completed payment.
+// stores the receipt AND immediately marks the transaction SUCCESS.
 //
-// NOTE: this deliberately does NOT trigger maybeSendReceiptEmail. The
-// "receipt" here is a file the applicant uploaded themselves (their own
-// proof of an offline payment) — not a payment this system confirmed and
-// generated an official PDF for. Wiring that in would mean emailing the
-// applicant back the exact file they just gave us, which isn't useful.
+// NOTE: `status: 'SUCCESS'` here only means "the applicant declares this
+// payment complete and attached proof" — it is NOT the same as Accounts
+// having verified it. Every RENEWAL-purpose transaction (this path and
+// the online MoMo path in saveTransaction above) now goes through a
+// separate `renewal_status` review — see POST /renewals/:id/approve and
+// /reject in receipt_routes.js — before a receipt email goes out. That's
+// also why this still doesn't call maybeSendReceiptEmail directly: the
+// renewal-approval receipt is sent once Accounts approves, via
+// sendRenewalApprovedReceipt, not automatically here.
 export const submitReceiptPayment = async (req, res) => {
   try {
     const {
       applicant_id, applicant_name, phone,
-      registration_number, amount, transaction_ref,
+      registration_number, amount, transaction_ref, email,
     } = req.body
 
     if (!req.file) {
@@ -344,6 +374,8 @@ export const submitReceiptPayment = async (req, res) => {
       payment_method:      'RECEIPT',
       registration_number,
       receipt_path:        receiptPath,
+      email:               email || null,
+      renewal_status:      'PENDING',
     })
 
     return res.status(201).json({
@@ -359,3 +391,84 @@ export const submitReceiptPayment = async (req, res) => {
     return res.status(500).json({ message: 'Failed to record renewal payment' })
   }
 }
+
+// ── Renewal review: email helpers ───────────────────────────────────
+// Both are called from POST /renewals/:id/approve and /reject in
+// receipt_routes.js, right after the renewal_status update. Neither
+// blocks the HTTP response — call sites fire-and-forget these with
+// .catch(), same pattern as maybeSendReceiptEmail above.
+
+// Renewal transactions don't always carry an `email` column (older rows
+// predate it, or a call site never sent one) — fall back to the same
+// Application-lookup strategy saveTransaction's pipeline already uses.
+async function resolveRenewalEmail(raw) {
+  if (raw.email) return raw.email
+  return resolveApplicantEmail({
+    application_id: raw.application_id,
+    applicant_id:   raw.applicant_id,
+  })
+}
+
+// Approval → generate/queue the same PDF-receipt-by-email pipeline as any
+// other confirmed SUCCESS payment, forced through regardless of the raw
+// MoMo attempt's own status (Accounts has now manually confirmed it).
+export async function sendRenewalApprovedReceipt(tx) {
+  if (!tx) return
+  const raw = typeof tx.toJSON === 'function' ? tx.toJSON() : tx
+
+  const email = await resolveRenewalEmail(raw)
+  if (!email) {
+    console.error(`[renewal-approved-receipt] No email on file for transaction ${raw.transaction_ref} — skipping receipt`)
+    return
+  }
+
+  await maybeSendReceiptEmail({ ...raw, status: 'SUCCESS', purpose: 'RENEWAL' }, { email })
+}
+
+// Rejection → a plain notice, no receipt attached (there's nothing to
+// confirm). Doesn't reuse the paymentReceiptQueue/worker since there's no
+// PDF and no receipt_email_status bookkeeping to do — this is a one-shot,
+// best-effort notification, same spirit as the applicant-facing
+// application-deferred email in application_routes.js.
+export async function sendRenewalRejectedNotice(tx, reason) {
+  if (!tx) return
+  const raw = typeof tx.toJSON === 'function' ? tx.toJSON() : tx
+
+  const email = await resolveRenewalEmail(raw)
+  if (!email) {
+    console.error(`[renewal-rejected-notice] No email on file for transaction ${raw.transaction_ref} — skipping notice`)
+    return
+  }
+
+  const html = `
+    <div style="font-family: Arial, Helvetica, sans-serif; background-color: #f8f2f2; padding: 30px;">
+      <div style="max-width: 600px; margin: auto; background-color: #ffffff; border-radius: 8px;">
+        <div style="background-color: #b30000; padding: 20px; text-align: center;">
+          <h1 style="color: #ffffff; margin: 0; font-size: 20px;">
+            Engineers Registration Board (ERB)
+          </h1>
+        </div>
+        <div style="padding: 25px;">
+          <h2 style="margin-top: 0;">Dear ${raw.applicant_name || 'Engineer'},</h2>
+          <p>We were unable to verify your recent licence renewal payment
+             (Ref: <strong>${raw.transaction_ref || '-'}</strong>), so it has not
+             been approved.</p>
+          ${reason ? `<p style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:12px 14px;color:#991b1b;"><strong>Reason:</strong> ${reason}</p>` : ''}
+          <p>Please review your payment details and resubmit, or contact the
+             Accounts office if you believe this is in error.</p>
+          <p>
+            Regards,<br/>
+            <strong>ERB Accounts Team</strong>
+          </p>
+        </div>
+      </div>
+    </div>
+  `
+
+  await sendStyledMail(
+    email,
+    `ERB Renewal Payment — Action Needed (${raw.transaction_ref || ''})`.trim(),
+    html
+  )
+}
+

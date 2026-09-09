@@ -8,7 +8,7 @@ import ReceiptModel  from '../models/Receipt.js'
 import { DataTypes } from 'sequelize'
 import receiptQueue  from '../queues/receipt_queue.js'
 
-import { saveTransaction, submitReceiptPayment, PaymentTransaction } from '../controllers/receipt-controller.js'
+import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalApprovedReceipt, sendRenewalRejectedNotice } from '../controllers/receipt-controller.js'
 import { parseReceiptWorkbook }        from '../utils/receipt-excel.js'
 import { generateEngineerReceiptPdf }  from '../utils/receipt-pdf.js'
 
@@ -188,6 +188,156 @@ router.post('/transactions/:id/retry', async (req, res) => {
   } catch (err) {
     console.error('[POST /transactions/retry]', err.message)
     return res.status(500).json({ message: 'Failed to reset transaction' })
+  }
+})
+
+// ── GET /uploads/:filename ──────────────────────────────────────────
+// Serves files saved to FILE_DIR — the receipts attached via
+// /renewal-payment (and /upload-receipt, /upload-wed-receipt) live here,
+// which is a *different* directory from the one the app-level
+// /api/erb/uploads/:filename route (index.js) serves. Without this,
+// there was no way to actually open an attached renewal receipt.
+router.get('/uploads/:filename', (req, res) => {
+  const { filename } = req.params
+
+  if (!filename || filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ message: 'Invalid filename' })
+  }
+
+  const filePath = path.join(FILE_DIR, filename)
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ message: 'File not found' })
+  }
+
+  const ext   = path.extname(filename).toLowerCase()
+  const isPdf = ext === '.pdf'
+  res.setHeader(
+    'Content-Disposition',
+    isPdf ? `inline; filename="${filename}"` : `attachment; filename="${filename}"`
+  )
+  return res.sendFile(filePath)
+})
+
+// ── GET /renewals ────────────────────────────────────────────────────
+// Admin: every RENEWAL-purpose transaction (online MoMo attempts and
+// attached-receipt submissions alike), most recent first. Optional
+// ?status=PENDING|APPROVED|REJECTED narrows to one stage of the Accounts
+// review — see renewal_status on PaymentTransaction.
+router.get('/renewals', async (req, res) => {
+  try {
+    const status = (req.query.status || '').trim().toUpperCase()
+    const where  = {
+      purpose: 'RENEWAL',
+      ...(status && status !== 'ALL' ? { renewal_status: status } : {}),
+    }
+
+    const rows = await PaymentTransaction.findAll({
+      where,
+      order: [['createdAt', 'DESC']],
+      limit: 500,
+    })
+
+    const [all, pending, approved, rejected] = await Promise.all([
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL' } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'PENDING' } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'APPROVED' } }),
+      PaymentTransaction.count({ where: { purpose: 'RENEWAL', renewal_status: 'REJECTED' } }),
+    ])
+
+    return res.json({
+      transactions: rows,
+      counts: { ALL: all, PENDING: pending, APPROVED: approved, REJECTED: rejected },
+    })
+  } catch (err) {
+    console.error('[GET /renewals]', err.message)
+    return res.status(500).json({ message: 'Failed to fetch renewal payments' })
+  }
+})
+
+// ── POST /renewals/:id/approve ────────────────────────────────────────
+// Accounts confirms a renewal payment (online or attached-receipt) is
+// genuine. Moves it from PENDING to APPROVED and emails the applicant a
+// receipt. Idempotent against re-approval; does not touch `status` (the
+// original payment attempt's own outcome stays on record).
+router.post('/renewals/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { comment, reviewed_by } = req.body || {}
+
+    const tx = await PaymentTransaction.findByPk(id)
+    if (!tx) return res.status(404).json({ message: 'Transaction not found' })
+    if (tx.purpose !== 'RENEWAL') {
+      return res.status(400).json({ message: 'This transaction is not a renewal payment' })
+    }
+    if (tx.renewal_status === 'APPROVED') {
+      return res.status(400).json({ message: 'This renewal payment has already been approved' })
+    }
+
+    await tx.update({
+      renewal_status:         'APPROVED',
+      renewal_reviewed_by:    reviewed_by || 'Admin',
+      renewal_reviewed_at:    new Date(),
+      renewal_review_comment: comment?.trim() || null,
+    })
+
+    // Best-effort, non-blocking — the decision itself is already recorded
+    // above regardless of whether the email succeeds.
+    sendRenewalApprovedReceipt(tx).catch(err =>
+      console.error('[renewals/approve] receipt email failed:', err.message)
+    )
+
+    return res.status(200).json({
+      message: 'Renewal payment approved — a receipt has been emailed to the applicant',
+      id: tx.id,
+      renewal_status: 'APPROVED',
+    })
+  } catch (err) {
+    console.error('[POST /renewals/:id/approve]', err.message)
+    return res.status(500).json({ message: 'Failed to approve this renewal payment' })
+  }
+})
+
+// ── POST /renewals/:id/reject ───────────────────────────────────────
+// The other outcome: Accounts couldn't verify the payment (bad/missing
+// receipt, unrecognised transaction, etc). Requires a comment — it's the
+// reason relayed to the applicant in the notification email.
+router.post('/renewals/:id/reject', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { comment, reviewed_by } = req.body || {}
+
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ message: 'A comment explaining the rejection is required' })
+    }
+
+    const tx = await PaymentTransaction.findByPk(id)
+    if (!tx) return res.status(404).json({ message: 'Transaction not found' })
+    if (tx.purpose !== 'RENEWAL') {
+      return res.status(400).json({ message: 'This transaction is not a renewal payment' })
+    }
+    if (tx.renewal_status === 'APPROVED') {
+      return res.status(400).json({ message: 'This renewal payment has already been approved and cannot be rejected' })
+    }
+
+    await tx.update({
+      renewal_status:         'REJECTED',
+      renewal_reviewed_by:    reviewed_by || 'Admin',
+      renewal_reviewed_at:    new Date(),
+      renewal_review_comment: comment.trim(),
+    })
+
+    sendRenewalRejectedNotice(tx, comment.trim()).catch(err =>
+      console.error('[renewals/reject] notification email failed:', err.message)
+    )
+
+    return res.status(200).json({
+      message: 'Renewal payment rejected — the applicant has been notified',
+      id: tx.id,
+      renewal_status: 'REJECTED',
+    })
+  } catch (err) {
+    console.error('[POST /renewals/:id/reject]', err.message)
+    return res.status(500).json({ message: 'Failed to reject this renewal payment' })
   }
 })
 
