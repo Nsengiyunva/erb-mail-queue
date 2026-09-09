@@ -11,7 +11,7 @@ const PORTAL_URL = 'https://registration.erb.go.ug';
 // in one worker (rather than one queue per event) mirrors how close
 // they are: same recipient, same idempotent EmailLog bookkeeping, only
 // the copy changes.
-function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber }) {
+function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee }) {
   const name         = applicantName || 'Applicant';
   const licenceLabel = applicationType || 'licence';
   const trackingLine = trackingNumber
@@ -52,6 +52,12 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
   }
 
   // APPROVED
+  const paymentUrl = applicationId ? `${PORTAL_URL}/application/${applicationId}` : PORTAL_URL;
+  const fmtUGX = (n) => (n == null ? null : `UGX ${Number(n).toLocaleString()}`);
+  const feeLine = registrationFee
+    ? `<p style="margin:0 0 10px;">The annual registration fee due is <strong>${fmtUGX(registrationFee)}</strong>.</p>`
+    : '';
+
   return {
     subject: `ERB: Application Approved${trackingNumber ? ` — ${trackingNumber}` : ''}`,
     body: `
@@ -59,9 +65,18 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
       <p>Congratulations — your ${licenceLabel} application has been approved by the Engineers Registration Board.</p>
       ${trackingLine}
       ${licenseNumber ? `<p style="font-size:15px;margin:14px 0;"><strong>Licence number: ${licenseNumber}</strong></p>` : ''}
-      <p>You can view further details any time on the ERB portal.</p>
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:18px 0;">
+        <p style="margin:0 0 10px;font-weight:bold;color:#065f46;">Next step: pay your annual registration fee</p>
+        ${feeLine}
+        <p style="margin:0 0 6px;">You can pay either way:</p>
+        <ul style="margin:0 0 10px;padding-left:20px;">
+          <li>Online via Mobile Money (MTN or Airtel) — the quickest option, confirmed instantly.</li>
+          <li>By bank transfer to the ERB account, then attach your payment receipt on the portal for Accounts to verify.</li>
+        </ul>
+        <p style="margin:0;">Log in to the portal and open this application to pay online or attach your receipt.</p>
+      </div>
       <p style="text-align:center;margin:28px 0;">
-        <a href="${PORTAL_URL}" style="background-color:#065f46;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">View on Portal</a>
+        <a href="${paymentUrl}" style="background-color:#065f46;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Pay Registration Fee</a>
       </p>
       <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
   };

@@ -6,6 +6,7 @@ import { Application }      from '../models/index.js'
 import { generateReceiptPdf } from '../utils/receipt-pdf.js'
 import paymentReceiptQueue    from '../queues/payment_receipt_queue.js'
 import { sendStyledMail }     from '../utils/mailer.js'
+import { resolveQuotedFee }   from '../utils/fee-schedule.js'
 
 // ── Model ─────────────────────────────────────────────────────────
 export const PaymentTransaction = sequelize.define('PaymentTransaction', {
@@ -15,6 +16,22 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   phone:               { type: DataTypes.STRING(20) },
   provider:            { type: DataTypes.STRING(20) },
   amount:              { type: DataTypes.INTEGER },
+  // The nominal ERB fee for this payment — what a receipt/email should
+  // ever quote — as opposed to `amount` above, which is what actually
+  // cleared (gateway-inclusive, always >= quoted_amount). Sent by the
+  // frontend at payment-initiation time (it already computes both
+  // figures to show the applicant what they owe vs. what the gateway
+  // charges — see computeFeeLabel in SectionF.js, ACTUAL_REGISTRATION_FEES
+  // in DisplayApplication.js, RENEWAL_FEES in the Renewals payment
+  // screens). Nullable: older transactions predate this column, and fall
+  // back to a category-based lookup — see resolveQuotedAmount() below.
+  quoted_amount:       { type: DataTypes.INTEGER },
+  // The category/profession string used to compute quoted_amount at save
+  // time (Permanent/Corporate, Temporary, Technologist, Technician) —
+  // kept alongside it mostly for audit/debugging, and as a second-best
+  // fallback signal (ahead of an Application lookup) if quoted_amount
+  // itself is ever missing.
+  fee_category:        { type: DataTypes.STRING(50) },
   applicant_name:      { type: DataTypes.STRING(200) },
   applicant_id:        { type: DataTypes.INTEGER },
   status:              { type: DataTypes.STRING(50),   defaultValue: 'INITIATED' },
@@ -109,6 +126,43 @@ async function resolveApplicantEmail({ email, application_id, applicant_id }) {
   return null
 }
 
+// ── Resolve the nominal (quoted) fee for a transaction ──────────────
+// `tx.amount` is what actually cleared — gateway fee included — and must
+// never appear on a receipt or in a receipt email. This resolves the
+// figure that should, in order of confidence:
+//   1. tx.quoted_amount, if the frontend sent one at save time (every
+//      current payment-initiation screen does — see fee-schedule.js);
+//   2. a category-based lookup (tx.fee_category if on file, else the
+//      underlying Application record's category/profession) against the
+//      QUOTED_FEES table — covers transactions saved before quoted_amount
+//      existed;
+//   3. tx.amount itself, as an absolute last resort, so a receipt is
+//      never blocked entirely on this — just not as accurate as it
+//      should be, which is logged so it's visible in practice.
+async function resolveQuotedAmount(tx) {
+  if (tx.quoted_amount != null) return tx.quoted_amount
+
+  let category = tx.fee_category || null
+
+  if (!category && tx.applicant_id) {
+    const byApplicant = await Application.findOne({
+      where: { applicant_id: tx.applicant_id },
+      order: [['updated_at', 'DESC']],
+    })
+    category = byApplicant?.category || byApplicant?.profession || null
+  }
+  if (!category && tx.application_id && /^\d+$/.test(String(tx.application_id))) {
+    const byId = await Application.findByPk(tx.application_id)
+    category = byId?.category || byId?.profession || null
+  }
+
+  const quoted = resolveQuotedFee(tx.purpose, category)
+  if (quoted != null) return quoted
+
+  console.warn(`[fee-schedule] Could not resolve a quoted fee for transaction ${tx.transaction_ref} (purpose: ${tx.purpose}, category: ${category || 'unknown'}) — falling back to the paid amount on the receipt.`)
+  return tx.amount ?? null
+}
+
 // ── SUCCESS → generate PDF receipt → queue email ───────────────────
 // Shared by saveTransaction (below) and the /payment-update webhook in
 // index.js, which is the actual trigger for a real Mobile Money payment
@@ -149,10 +203,16 @@ export async function maybeSendReceiptEmail(record, { email } = {}) {
       return
     }
 
+    // Always the nominal fee, never the gateway-inclusive paid amount —
+    // see resolveQuotedAmount() above.
+    const quotedAmount = await resolveQuotedAmount(tx)
+
     const filePath = await generateReceiptPdf({
       ...tx,
+      amount:  quotedAmount,
       purpose: tx.purpose || 'APPLICATION',
     })
+
 
     await paymentReceiptQueue.add(
       'send-payment-receipt',
@@ -161,7 +221,7 @@ export async function maybeSendReceiptEmail(record, { email } = {}) {
         email:          resolvedEmail,
         filePath,
         applicantName:  tx.applicant_name,
-        amount:         tx.amount,
+        amount:         quotedAmount,
         purpose:        tx.purpose || 'APPLICATION',
       },
       { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
@@ -238,13 +298,17 @@ export async function sendAccountsVerificationReceipt(application) {
   )
 
   const syntheticRef = `ERB-${raw.id}-ACCTVERIFIED`
+  // No PaymentTransaction row to carry a quoted_amount here (the receipt
+  // was attached directly at submission), so quote straight from the fee
+  // schedule using this application's own category/profession.
+  const quotedAmount = resolveQuotedFee('APPLICATION', raw.category || raw.profession)
 
   try {
     const filePath = await generateReceiptPdf({
       transaction_ref: syntheticRef,
       application_id:  raw.id,
       applicant_name:  applicantName,
-      amount:          null, // no confirmed amount on file for a directly-attached receipt
+      amount:          quotedAmount,
       provider:        null,
       phone:            raw.telephone || raw.registered_phone_number || raw.provided_number,
       purpose:          'APPLICATION',
@@ -260,7 +324,7 @@ export async function sendAccountsVerificationReceipt(application) {
         email,
         filePath,
         applicantName,
-        amount:  null,
+        amount:  quotedAmount,
         purpose: 'APPLICATION',
         // Tells the worker to confirm via Application.accounts_receipt_email_status
         // instead of PaymentTransaction.receipt_email_status — there's no
@@ -284,6 +348,7 @@ export const saveTransaction = async (req, res) => {
     application_id, transaction_ref, phone,
     provider, amount, applicant_name, applicant_id, status,
     purpose, payment_method, registration_number, email,
+    quoted_amount, category,
   } = req.body
 
   if (!application_id || !transaction_ref) {
@@ -319,6 +384,11 @@ export const saveTransaction = async (req, res) => {
       registration_number,
       email:          email || existing?.email || null,
       renewal_status: resolvedRenewalStatus,
+      // Nominal fee the receipt/email should quote — see fee-schedule.js.
+      // Falls back to whatever was already on file (e.g. a status-update
+      // call that doesn't resend it) rather than wiping a good value.
+      quoted_amount:  quoted_amount ?? existing?.quoted_amount ?? null,
+      fee_category:   category || existing?.fee_category || null,
     })
 
     res.json({ saved: true })
@@ -356,6 +426,7 @@ export const submitReceiptPayment = async (req, res) => {
     const {
       applicant_id, applicant_name, phone,
       registration_number, amount, transaction_ref, email,
+      quoted_amount, category,
     } = req.body
 
     if (!req.file) {
@@ -384,6 +455,8 @@ export const submitReceiptPayment = async (req, res) => {
       receipt_path:        receiptPath,
       email:               email || null,
       renewal_status:      'PENDING',
+      quoted_amount:       quoted_amount ? parseInt(quoted_amount, 10) : null,
+      fee_category:        category || null,
     })
 
     return res.status(201).json({

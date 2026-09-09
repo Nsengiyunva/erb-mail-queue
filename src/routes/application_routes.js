@@ -401,6 +401,7 @@ import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt } from "../controllers/receipt-controller.js";
+import { resolveQuotedFee } from "../utils/fee-schedule.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
@@ -1651,6 +1652,152 @@ router.post("/accounts_defer_bulk", async (req, res) => {
   }
 });
 
+// ── Shared core: board-review approve / defer ───────────────────────
+// Same refactor pattern as verifyApplicationPayment/deferApplicationForPayment
+// above — used by both the single routes (POST /board_approve, /defer)
+// and their bulk counterparts (POST /board_approve_bulk, /defer_bulk) for
+// the Board Review checkbox-select UI.
+async function approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number }) {
+  if (!applicationID || !comment || !comment.trim()) {
+    const err = new Error("applicationID and a comment are both required");
+    err.status = 400;
+    throw err;
+  }
+
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) {
+    const err = new Error("Application not found");
+    err.status = 404;
+    throw err;
+  }
+
+  const raw = application.toJSON();
+  const effective = computeEffectiveStatus(raw);
+
+  if (effective.status !== "ACCOUNTS_APPROVED") {
+    const err = new Error(`This application isn't awaiting board review (current status: ${effective.status}).`);
+    err.status = 400;
+    throw err;
+  }
+
+  const trimmedLicenseNumber = license_number ? String(license_number).trim() : null;
+
+  await application.update({
+    status:             "BOARD_APPROVED",
+    sponsors:            effective.sponsors, // carries the sponsor-signed correction, if any, atomically
+    board_comment:       comment.trim(),
+    board_approved_by:   approved_by || "Admin",
+    board_approved_at:   new Date(),
+    ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
+  });
+
+  // ── Mirror the approval onto the legacy old_users table ──────────
+  // See models/OldUser.js — the join key (email) and column names are
+  // a best guess pending confirmation. Failure here is logged but
+  // never fails the approval itself: the application record is the
+  // source of truth, and this is a best-effort mirror of it.
+  if (raw.email_address) {
+    try {
+      const oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
+      if (oldUser) {
+        await oldUser.update({
+          registered: "Yes",
+          ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
+        });
+      } else {
+        console.warn(`[board_approve] No old_users row found for ${raw.email_address} — registered flag not updated.`);
+      }
+    } catch (oldUserError) {
+      console.error("[board_approve] Failed to update old_users row:", oldUserError);
+    }
+  }
+
+  // Applicant-facing approval email — now also carries the registration
+  // fee due next and how to pay it (see buildEmail's APPROVED branch in
+  // application_status_email_worker.js).
+  try {
+    await applicationStatusEmailQueue.add(
+      "application-approved-email",
+      {
+        type:              "APPROVED",
+        to:                raw.email_address,
+        applicantName:     raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        trackingNumber:    trackingNumber(application.id),
+        applicationType:   raw.type,
+        licenseNumber:     trimmedLicenseNumber,
+        applicationId:     application.id,
+        registrationFee:   resolveQuotedFee("REGISTRATION", raw.category || raw.profession),
+      },
+      {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      }
+    );
+  } catch (emailQueueError) {
+    console.error("Failed to queue application-approved email (approval was still recorded):", emailQueueError);
+  }
+
+  return { application_status: application.status, license_number: trimmedLicenseNumber };
+}
+
+async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_by }) {
+  if (!applicationID || !comment || !comment.trim()) {
+    const err = new Error("applicationID and a comment are both required");
+    err.status = 400;
+    throw err;
+  }
+
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) {
+    const err = new Error("Application not found");
+    err.status = 404;
+    throw err;
+  }
+
+  const raw = application.toJSON();
+  const effective = computeEffectiveStatus(raw);
+
+  if (effective.status !== "ACCOUNTS_APPROVED") {
+    const err = new Error(`This application isn't awaiting board review, so it can't be deferred here (current status: ${effective.status}).`);
+    err.status = 400;
+    throw err;
+  }
+
+  await application.update({
+    status:         "DEFERRED",
+    sponsors:       effective.sponsors,
+    defer_comment:  comment.trim(),
+    deferred_by:    deferred_by || "Admin",
+    deferred_at:    new Date(),
+  });
+
+  try {
+    await applicationStatusEmailQueue.add(
+      "application-deferred-email",
+      {
+        type:            "SENT_BACK",
+        to:              raw.email_address,
+        applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        trackingNumber:  trackingNumber(application.id),
+        applicationType: raw.type,
+        reason:          comment.trim(),
+      },
+      {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      }
+    );
+  } catch (emailQueueError) {
+    console.error("Failed to queue application-sent-back email (defer was still recorded):", emailQueueError);
+  }
+
+  return { application_status: application.status };
+}
+
 // ── POST /board_approve ──────────────────────────────────────────
 // Lets a Registration-level admin approve an application on behalf of
 // the Board (used when the actual Board review workflow hasn't happened
@@ -1663,90 +1810,62 @@ router.post("/accounts_defer_bulk", async (req, res) => {
 // request body for the audit trail — worth tightening with real
 // server-side auth before this is relied on for compliance purposes.
 router.post("/board_approve", async (req, res) => {
+  const { applicationID, comment, approved_by, license_number } = req.body || {};
   try {
-    const { applicationID, comment, approved_by, license_number } = req.body || {};
-
-    if (!applicationID || !comment || !comment.trim()) {
-      return res.status(400).json({ message: "applicationID and a comment are both required" });
-    }
-
-    const application = await Application.findOne({ where: { id: applicationID } });
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
-
-    const raw = application.toJSON();
-    const effective = computeEffectiveStatus(raw);
-
-    if (effective.status !== "ACCOUNTS_APPROVED") {
-      return res.status(400).json({
-        message: `This application isn't awaiting board review (current status: ${effective.status}).`,
-      });
-    }
-
-    const trimmedLicenseNumber = license_number ? String(license_number).trim() : null;
-
-    await application.update({
-      status:             "BOARD_APPROVED",
-      sponsors:            effective.sponsors, // carries the sponsor-signed correction, if any, atomically
-      board_comment:       comment.trim(),
-      board_approved_by:   approved_by || "Admin",
-      board_approved_at:   new Date(),
-      ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
+    const result = await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number });
+    return res.status(200).json({
+      message: "Application approved on behalf of the Board",
+      ...result,
     });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Failed to record board approval:", error);
+    return res.status(500).json({ message: "Failed to approve application" });
+  }
+});
 
-    // ── Mirror the approval onto the legacy old_users table ──────────
-    // See models/OldUser.js — the join key (email) and column names are
-    // a best guess pending confirmation. Failure here is logged but
-    // never fails the approval itself: the application record is the
-    // source of truth, and this is a best-effort mirror of it.
-    if (raw.email_address) {
+// ── POST /board_approve_bulk ──────────────────────────────────────
+// Bulk version of /board_approve for the Board Review checkbox-select
+// UI: one comment applied to every selected application. Deliberately
+// does NOT accept a license_number — a single number can't sensibly
+// apply to a batch of different engineers, so bulk-approved applications
+// are approved without one (an admin can still set one afterwards via
+// the single-item approve action, which is idempotent-safe to re-run for
+// that purpose... actually re-approval is blocked once BOARD_APPROVED,
+// so for now a license number after bulk approval needs a direct edit —
+// flagged in case that turns out to matter in practice).
+router.post("/board_approve_bulk", async (req, res) => {
+  try {
+    const { applicationIDs, comment, approved_by } = req.body || {};
+
+    if (!Array.isArray(applicationIDs) || applicationIDs.length === 0) {
+      return res.status(400).json({ message: "Select at least one application" });
+    }
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ message: "Please add a comment before approving" });
+    }
+    if (applicationIDs.length > 200) {
+      return res.status(400).json({ message: "Please select 200 applications or fewer at a time" });
+    }
+
+    const results = [];
+    for (const applicationID of applicationIDs) {
       try {
-        const oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
-        if (oldUser) {
-          await oldUser.update({
-            registered: "Yes",
-            ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
-          });
-        } else {
-          console.warn(`[board_approve] No old_users row found for ${raw.email_address} — registered flag not updated.`);
-        }
-      } catch (oldUserError) {
-        console.error("[board_approve] Failed to update old_users row:", oldUserError);
+        await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by });
+        results.push({ applicationID, ok: true });
+      } catch (err) {
+        results.push({ applicationID, ok: false, message: err.message || "Failed to approve" });
       }
     }
 
-    // Applicant-facing approval email.
-    try {
-      await applicationStatusEmailQueue.add(
-        "application-approved-email",
-        {
-          type:            "APPROVED",
-          to:              raw.email_address,
-          applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
-          trackingNumber:  trackingNumber(application.id),
-          applicationType: raw.type,
-          licenseNumber:   trimmedLicenseNumber,
-        },
-        {
-          attempts: 3,
-          backoff: { type: "exponential", delay: 5000 },
-          removeOnComplete: true,
-          removeOnFail: false,
-        }
-      );
-    } catch (emailQueueError) {
-      console.error("Failed to queue application-approved email (approval was still recorded):", emailQueueError);
-    }
-
+    const succeeded = results.filter(r => r.ok).length;
     return res.status(200).json({
-      message: "Application approved on behalf of the Board",
-      application_status: application.status,
-      license_number: trimmedLicenseNumber,
+      message: `${succeeded} of ${results.length} application(s) approved on behalf of the Board`,
+      results,
     });
   } catch (error) {
-    console.error("Failed to record board approval:", error);
-    return res.status(500).json({ message: "Failed to approve application" });
+    console.error("Failed to record bulk board approval:", error);
+    return res.status(500).json({ message: "Failed to process bulk board approval" });
   }
 });
 
@@ -1769,70 +1888,55 @@ router.post("/board_approve", async (req, res) => {
 // ACCOUNTS_APPROVED → this review step again) once the applicant
 // resubmits — nothing DEFERRED-specific to unwind.
 router.post("/defer", async (req, res) => {
+  const { applicationID, comment, deferred_by } = req.body || {};
   try {
-    const { applicationID, comment, deferred_by } = req.body || {};
-
-    if (!applicationID || !comment || !comment.trim()) {
-      return res.status(400).json({ message: "applicationID and a comment are both required" });
-    }
-
-    const application = await Application.findOne({ where: { id: applicationID } });
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
-
-    const raw = application.toJSON();
-    const effective = computeEffectiveStatus(raw);
-
-    if (effective.status !== "ACCOUNTS_APPROVED") {
-      return res.status(400).json({
-        message: `This application isn't awaiting board review, so it can't be deferred here (current status: ${effective.status}).`,
-      });
-    }
-
-    await application.update({
-      status:         "DEFERRED",
-      sponsors:       effective.sponsors,
-      defer_comment:  comment.trim(),
-      deferred_by:    deferred_by || "Admin",
-      deferred_at:    new Date(),
-    });
-
-    // Applicant-facing email with the reason it was sent back. The
-    // "put it in draft mode and allow edit/resubmit" part of this needs
-    // no extra work here — DisplayApplication.js already shows an "Edit
-    // application" action for status DEFERRED, and re-submitting goes
-    // back through POST /submit-application, which unconditionally
-    // resets status to PENDING (see the comment above this route).
-    try {
-      await applicationStatusEmailQueue.add(
-        "application-deferred-email",
-        {
-          type:            "SENT_BACK",
-          to:              raw.email_address,
-          applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
-          trackingNumber:  trackingNumber(application.id),
-          applicationType: raw.type,
-          reason:          comment.trim(),
-        },
-        {
-          attempts: 3,
-          backoff: { type: "exponential", delay: 5000 },
-          removeOnComplete: true,
-          removeOnFail: false,
-        }
-      );
-    } catch (emailQueueError) {
-      console.error("Failed to queue application-sent-back email (defer was still recorded):", emailQueueError);
-    }
-
+    const result = await deferApplicationOnBoardBehalf(applicationID, { comment, deferred_by });
     return res.status(200).json({
       message: "Application sent back to the applicant for updates",
-      application_status: application.status,
+      ...result,
     });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
     console.error("Failed to record defer:", error);
     return res.status(500).json({ message: "Failed to defer application" });
+  }
+});
+
+// ── POST /defer_bulk ───────────────────────────────────────────────
+// Bulk version of /defer — same shape as /board_approve_bulk /
+// /accounts_defer_bulk above.
+router.post("/defer_bulk", async (req, res) => {
+  try {
+    const { applicationIDs, comment, deferred_by } = req.body || {};
+
+    if (!Array.isArray(applicationIDs) || applicationIDs.length === 0) {
+      return res.status(400).json({ message: "Select at least one application" });
+    }
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ message: "Please add a comment explaining why these are being sent back" });
+    }
+    if (applicationIDs.length > 200) {
+      return res.status(400).json({ message: "Please select 200 applications or fewer at a time" });
+    }
+
+    const results = [];
+    for (const applicationID of applicationIDs) {
+      try {
+        await deferApplicationOnBoardBehalf(applicationID, { comment, deferred_by });
+        results.push({ applicationID, ok: true });
+      } catch (err) {
+        results.push({ applicationID, ok: false, message: err.message || "Failed to defer" });
+      }
+    }
+
+    const succeeded = results.filter(r => r.ok).length;
+    return res.status(200).json({
+      message: `${succeeded} of ${results.length} application(s) sent back to the applicant`,
+      results,
+    });
+  } catch (error) {
+    console.error("Failed to record bulk defer:", error);
+    return res.status(500).json({ message: "Failed to process bulk defer" });
   }
 });
 
