@@ -15,6 +15,9 @@ export default (sequelize, DataTypes) => {
       other_names:             DataTypes.STRING,
       email_address:           DataTypes.STRING,
       telephone:               DataTypes.STRING,
+      // Optional second contact number the applicant can add on Section A
+      // of the licence application form, alongside their main telephone.
+      alternate_phone:         DataTypes.STRING,
       registered_phone_number: DataTypes.STRING,
       provided_number:         DataTypes.STRING,
       gender:                  DataTypes.STRING,
