@@ -17,6 +17,23 @@ if (!fs.existsSync(RECEIPT_PDF_DIR)) {
 const fmtUGX = (n) =>
   n == null ? '-' : `UGX ${Number(n).toLocaleString('en-UG', { maximumFractionDigits: 0 })}`
 
+const ERB_FEE_MAP = {
+  406100:  400000,    // Application — Permanent / Temporary
+  203050:  200000,    // Application — Technologist
+  101560:  100000,    // Application — Technician
+  1055900: 1040000,   // Registration — Permanent
+  3045700: 3000000,   // Registration — Temporary
+  761450:  750000,    // Registration — Technologist
+  609150:  600000,    // Registration — Technician / Renewal — Permanent
+  1827430: 1800000,   // Renewal — Temporary
+  659920:  650000,    // Renewal — Technologist
+  507650:  500000,    // Renewal — Technician
+}
+const erbFee = (amount) => {
+  const n = Number(amount)
+  return ERB_FEE_MAP[n] ?? n
+}
+
 const fmtDate = (d) =>
   new Date(d || Date.now()).toLocaleString('en-UG', {
     year: 'numeric', month: 'long', day: 'numeric',
@@ -32,6 +49,14 @@ const PURPOSE_LABEL = {
   APPLICATION:  'Application Fee',
   REGISTRATION: 'Annual Registration Fee',
   RENEWAL:      'Annual Renewal Fee',
+}
+
+// Short form for the "Payment Type" row in the details table below —
+// PURPOSE_LABEL above is the longer subtitle under the receipt title.
+const PURPOSE_TYPE_LABEL = {
+  APPLICATION:  'Application',
+  REGISTRATION: 'Registration',
+  RENEWAL:      'Renewal',
 }
 
 /**
@@ -69,7 +94,7 @@ export function generateReceiptPdf(tx) {
         .fontSize(15).font('Helvetica-Bold')
         .text('ENGINEERS REGISTRATION BOARD', contentLeft + 60, headerTop + 2, { width: contentW - 60 })
         .fontSize(9).font('Helvetica').fillColor('#64748b')
-        .text('Plot 7, Nkrumah Road, Kampala, Uganda  ·  www.erb.go.ug', contentLeft + 60, headerTop + 22, { width: contentW - 60 })
+        .text('Management Support Unit Building, Plot 2 Gloucester Avenue, Kyambogo  ·  www.erb.go.ug', contentLeft + 60, headerTop + 22, { width: contentW - 60 })
 
       doc.moveDown(2.5)
       doc.moveTo(contentLeft, doc.y).lineTo(contentLeft + contentW, doc.y).strokeColor('#b30000').lineWidth(2).stroke()
@@ -96,14 +121,15 @@ export function generateReceiptPdf(tx) {
       doc.fillColor('#94a3b8').fontSize(8).font('Helvetica-Bold')
         .text('AMOUNT PAID', contentLeft + colW, stripTop + 10, { width: colW - 16, align: 'right' })
       doc.fillColor('#15803d').fontSize(15).font('Helvetica-Bold')
-        .text(fmtUGX(tx.amount), contentLeft + colW, stripTop + 22, { width: colW - 16, align: 'right' })
+        .text(fmtUGX(erbFee(tx.amount)), contentLeft + colW, stripTop + 22, { width: colW - 16, align: 'right' })
 
       doc.y = stripTop + stripH + 24
 
       // ── Details table ────────────────────────────────────────────
       const rows = [
         ['Applicant Name',        tx.applicant_name || '-'],
-        ['Registration Number',   tx.registration_number || tx.application_id || '-'],
+        ['Payment Type',          PURPOSE_TYPE_LABEL[tx.purpose] || tx.purpose || '-'],
+        ['Tracking Number',       tx.registration_number || tx.application_id || '-'],
         ['Payment Method',        tx.payment_method === 'MOBILE' ? `Mobile Money (${tx.provider || '-'})` : (tx.payment_method || tx.provider || '-')],
         ['Phone Number',          tx.phone || '-'],
         ['Payment Status',        'SUCCESS'],
@@ -258,4 +284,3 @@ export function generateEngineerReceiptPdf(record) {
     }
   })
 }
-
