@@ -118,12 +118,29 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+
+      // Set for invoices created through bulk upload — groups one upload.
+      batch_id: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+      },
+
+      // Last SMTP/queue error, shown in Invoice Records for failed sends.
+      send_error: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
     },
     {
       tableName: "erb_invoices",
       timestamps: true,
       createdAt: "created_at",
       updatedAt: "updated_at",
+      indexes: [
+        { fields: ["batch_id"] },
+        { fields: ["invoice_no"] },
+        { fields: ["erb_no", "financial_year"] },
+      ],
     }
   );
 

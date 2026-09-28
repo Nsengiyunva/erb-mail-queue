@@ -7,6 +7,10 @@ import { sequelize }  from '../config/database.js'
 import InvoiceModel   from '../models/Invoice.js'
 import { DataTypes }  from 'sequelize'
 import invoiceQueue   from '../queues/invoice_queue.js'
+import {
+  MAX_BULK_ROWS, parseSpreadsheet, validateBatch, buildTemplate,
+  defaultBatchSettings, newBatchId,
+} from '../utils/bulk-invoice.js'
 
 const router  = express.Router()
 const Invoice = InvoiceModel(sequelize, DataTypes)
@@ -46,6 +50,30 @@ const storage = multer.diskStorage({
 })
 
 const upload = multer({ storage })
+
+// Bulk spreadsheets are parsed in memory and never written to disk.
+const bulkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (/\.(csv|xlsx|xls)$/i.test(file.originalname)) return cb(null, true)
+    cb(new Error('Only .csv, .xlsx or .xls files are allowed'))
+  },
+})
+
+// Same options for every invoice email job (single, resend, bulk)
+const JOB_OPTS = { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
+
+const queueInvoiceEmail = (invoice) => invoiceQueue.add('send-invoice', {
+  invoiceId:     invoice.id,
+  email:         invoice.email,
+  filePath:      invoice.file_path,
+  originalName:  invoice.original_name,
+  invoiceNo:     invoice.invoice_no,
+  engineerName:  invoice.engineer_name,
+  financialYear: invoice.financial_year,
+  totalAmount:   invoice.total_amount,
+}, JOB_OPTS)
 
 // ── Shared derived-totals calculation ────────────────────────────
 // Mirrors the frontend's computeInvoiceTotals() exactly — recomputed
@@ -138,6 +166,9 @@ router.get('/', async (req, res) => {
     if (req.query.status) {
       where.status = req.query.status
     }
+    if (req.query.batch_id) {
+      where.batch_id = req.query.batch_id
+    }
 
     const { rows, count } = await Invoice.findAndCountAll({
       where,
@@ -157,6 +188,236 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Invoice list failed:', error)
     res.status(500).json({ message: 'Failed to fetch invoices' })
+  }
+})
+
+
+// ══════════════════════════════════════════════════════════════════
+//  BULK UPLOAD
+//  1. GET  /bulk/template      → blank .xlsx / .csv with the right columns
+//  2. POST /bulk/validate      → parse + validate, writes nothing
+//  3. POST /bulk/commit        → re-validate, save valid rows (status 'saved')
+//  4. POST /:id/attach-and-send→ browser uploads each generated PDF → queued
+//  5. GET  /bulk/:batchId      → live status of every invoice in the batch
+//  PDFs are rendered in the browser with the same @react-pdf template
+//  as single invoices, so bulk and single invoices always look identical.
+// ══════════════════════════════════════════════════════════════════
+
+// Settings arrive as a JSON string (multipart) or object (JSON body).
+const readSettings = (input) => {
+  let s = input
+  if (typeof s === 'string') {
+    try { s = JSON.parse(s) } catch { s = {} }
+  }
+  const allowed = Object.keys(defaultBatchSettings())
+  const out = {}
+  for (const k of allowed) {
+    if (s && s[k] !== undefined && s[k] !== null && String(s[k]).trim() !== '') out[k] = s[k]
+  }
+  return { ...defaultBatchSettings(), ...out }
+}
+
+// Checks that need the database. Mutates each result's errors/warnings.
+const checkAgainstDb = async (results) => {
+  const invoiceNos = results.map(r => r.data.invoice_no).filter(Boolean)
+  const erbNos     = [...new Set(results.map(r => r.data.erb_no).filter(Boolean))]
+
+  const [existingNos, existingForFY] = await Promise.all([
+    invoiceNos.length
+      ? Invoice.findAll({ attributes: ['invoice_no'], where: { invoice_no: { [Op.in]: invoiceNos } }, raw: true })
+      : [],
+    erbNos.length
+      ? Invoice.findAll({
+          attributes: ['erb_no', 'financial_year', 'invoice_no', 'status'],
+          where: { erb_no: { [Op.in]: erbNos } },
+          raw: true,
+        })
+      : [],
+  ])
+
+  const takenNos = new Set(existingNos.map(r => String(r.invoice_no).toUpperCase()))
+  const priorByKey = new Map()
+  for (const r of existingForFY) {
+    const key = `${r.erb_no}|${r.financial_year}`.toUpperCase()
+    if (!priorByKey.has(key)) priorByKey.set(key, [])
+    priorByKey.get(key).push(r)
+  }
+
+  for (const r of results) {
+    if (takenNos.has(r.data.invoice_no.toUpperCase())) {
+      r.errors.push(`Invoice number ${r.data.invoice_no} already exists in Invoice Records`)
+    }
+    const prior = priorByKey.get(`${r.data.erb_no}|${r.data.financial_year}`.toUpperCase())
+    if (prior?.length) {
+      const list = prior.map(p => `${p.invoice_no} (${p.status})`).join(', ')
+      r.warnings.push(`Engineer already has an invoice for FY ${r.data.financial_year}: ${list}`)
+    }
+  }
+  return results
+}
+
+const summarise = (results) => ({
+  total:        results.length,
+  valid:        results.filter(r => !r.errors.length).length,
+  withWarnings: results.filter(r => !r.errors.length && r.warnings.length).length,
+  invalid:      results.filter(r => r.errors.length).length,
+  totalAmount:  results.filter(r => !r.errors.length).reduce((a, r) => a + r.data.total_amount, 0),
+})
+
+// ── GET /bulk/template?format=xlsx|csv ───────────────────────────
+router.get('/bulk/template', (req, res) => {
+  const { buffer, mime, ext } = buildTemplate(req.query.format === 'csv' ? 'csv' : 'xlsx')
+  res.setHeader('Content-Type', mime)
+  res.setHeader('Content-Disposition', `attachment; filename="erb-bulk-invoice-template.${ext}"`)
+  res.send(buffer)
+})
+
+// ── POST /bulk/validate (multipart: file, settings) ──────────────
+router.post('/bulk/validate', (req, res, next) => {
+  bulkUpload.single('file')(req, res, (err) => {
+    if (err) {
+      const msg = err.code === 'LIMIT_FILE_SIZE' ? 'File is larger than 5 MB' : err.message
+      return res.status(400).json({ message: msg })
+    }
+    next()
+  })
+}, async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Please attach a .csv or .xlsx file' })
+
+    let parsed
+    try {
+      parsed = parseSpreadsheet(req.file.buffer, req.file.originalname)
+    } catch (e) {
+      return res.status(400).json({ message: `Could not read the file: ${e.message}` })
+    }
+
+    if (parsed.missingRequired.length) {
+      return res.status(400).json({
+        message: `Missing required column(s): ${parsed.missingRequired.join(', ')}. Download the template to see the expected headers.`,
+        missingRequired: parsed.missingRequired,
+      })
+    }
+    if (!parsed.rows.length) return res.status(400).json({ message: 'The file has headers but no data rows' })
+    if (parsed.rows.length > MAX_BULK_ROWS) {
+      return res.status(400).json({ message: `Too many rows (${parsed.rows.length}). Maximum is ${MAX_BULK_ROWS} per upload — split the file.` })
+    }
+
+    const settings = readSettings(req.body.settings)
+    const batch_id = newBatchId()
+    const results  = await checkAgainstDb(validateBatch(parsed.rows, settings, batch_id))
+
+    res.json({
+      batch_id,
+      settings,
+      file_name:      req.file.originalname,
+      unknownHeaders: parsed.unknownHeaders,
+      summary:        summarise(results),
+      rows:           results,
+    })
+  } catch (error) {
+    console.error('Bulk validate failed:', error)
+    res.status(500).json({ message: 'Failed to validate the file' })
+  }
+})
+
+// ── POST /bulk/commit (JSON: batch_id, settings, rows:[{row,data}]) ──
+// Everything is re-validated here — the browser's copy is never trusted.
+router.post('/bulk/commit', async (req, res) => {
+  try {
+    const { batch_id, rows } = req.body || {}
+    if (!batch_id || !/^B[A-Z0-9]{6,20}$/.test(batch_id)) {
+      return res.status(400).json({ message: 'Invalid batch id — validate the file again' })
+    }
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ message: 'No rows selected' })
+    if (rows.length > MAX_BULK_ROWS) return res.status(400).json({ message: `Maximum is ${MAX_BULK_ROWS} rows` })
+
+    const already = await Invoice.count({ where: { batch_id } })
+    if (already) return res.status(409).json({ message: 'This batch has already been saved. Open it from the send step or Invoice Records.' })
+
+    const settings = readSettings(req.body.settings)
+    const results  = await checkAgainstDb(
+      validateBatch(rows.map(r => ({ row: r.row, raw: r.data || {} })), settings, batch_id)
+    )
+
+    const good     = results.filter(r => !r.errors.length)
+    const rejected = results.filter(r => r.errors.length).map(r => ({ row: r.row, errors: r.errors }))
+
+    if (!good.length) return res.status(400).json({ message: 'None of the selected rows are valid', rejected })
+
+    const created = await sequelize.transaction(async (transaction) =>
+      Invoice.bulkCreate(
+        good.map(r => ({ ...r.data, batch_id, status: 'saved' })),
+        { transaction, validate: true }
+      )
+    )
+
+    // bulkCreate on MySQL doesn't return ids reliably → read them back
+    const saved = await Invoice.findAll({ where: { batch_id }, order: [['id', 'ASC']] })
+
+    res.status(201).json({
+      message: `${saved.length} invoice(s) saved`,
+      batch_id,
+      created: saved,
+      createdCount: created.length,
+      rejected,
+    })
+  } catch (error) {
+    console.error('Bulk commit failed:', error)
+    res.status(500).json({ message: 'Failed to save the invoices' })
+  }
+})
+
+// ── GET /bulk/:batchId — status of a batch ───────────────────────
+router.get('/bulk/:batchId', async (req, res) => {
+  try {
+    const invoices = await Invoice.findAll({
+      where: { batch_id: req.params.batchId },
+      order: [['id', 'ASC']],
+    })
+    if (!invoices.length) return res.status(404).json({ message: 'Batch not found' })
+
+    const counts = invoices.reduce((acc, i) => { acc[i.status] = (acc[i.status] || 0) + 1; return acc }, {})
+    res.json({ batch_id: req.params.batchId, counts, total: invoices.length, data: invoices })
+  } catch (error) {
+    console.error('Bulk status failed:', error)
+    res.status(500).json({ message: 'Failed to fetch batch status' })
+  }
+})
+
+// ── POST /:id/attach-and-send — attach generated PDF to a saved record & queue it ──
+// Uses the stored (validated) record, not client-supplied fields.
+router.post('/:id/attach-and-send', upload.single('file'), async (req, res) => {
+  const cleanup = () => { if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path) }
+  try {
+    const invoice = await Invoice.findByPk(req.params.id)
+    if (!invoice) { cleanup(); return res.status(404).json({ message: 'Invoice not found' }) }
+    if (!req.file) return res.status(400).json({ message: 'Invoice PDF is required' })
+    if (!invoice.email) { cleanup(); return res.status(400).json({ message: 'This invoice has no email address' }) }
+    if (['sent', 'pending'].includes(invoice.status) && req.query.force !== '1') {
+      cleanup()
+      return res.status(409).json({ message: `Invoice is already ${invoice.status === 'sent' ? 'sent' : 'queued'}`, invoice })
+    }
+
+    // Remove a previous PDF for this record, if any
+    if (invoice.file_path && invoice.file_path !== req.file.path && fs.existsSync(invoice.file_path)) {
+      try { fs.unlinkSync(invoice.file_path) } catch { /* ignore */ }
+    }
+
+    await invoice.update({
+      file_name:     req.file.filename,
+      original_name: req.file.originalname,
+      file_path:     req.file.path,
+      status:        'pending',
+      send_error:    null,
+    })
+
+    await queueInvoiceEmail(invoice)
+    res.json({ message: 'Invoice queued for sending', invoice })
+  } catch (error) {
+    cleanup()
+    console.error('Invoice attach-and-send failed:', error)
+    res.status(500).json({ message: 'Failed to queue invoice' })
   }
 })
 
@@ -191,21 +452,8 @@ router.post('/:id/resend', async (req, res) => {
       })
     }
 
-    await invoice.update({ status: 'pending' })
-
-    await invoiceQueue.add('send-invoice',
-      {
-        invoiceId:     invoice.id,
-        email:         invoice.email,
-        filePath:      invoice.file_path,
-        originalName:  invoice.original_name,
-        invoiceNo:     invoice.invoice_no,
-        engineerName:  invoice.engineer_name,
-        financialYear: invoice.financial_year,
-        totalAmount:   invoice.total_amount,
-      },
-      { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
-    )
+    await invoice.update({ status: 'pending', send_error: null })
+    await queueInvoiceEmail(invoice)
 
     res.json({ message: 'Invoice queued for resending', invoice })
   } catch (error) {

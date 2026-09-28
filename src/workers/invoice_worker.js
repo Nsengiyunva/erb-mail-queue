@@ -25,8 +25,9 @@ const worker = new Worker(
       totalAmount,
     } = job.data;
 
-    const transaction = await sequelize.transaction();
-
+    // No DB transaction here: the only write is a single-row UPDATE, and
+    // holding a transaction open across the SMTP call tied up a pool
+    // connection and could trigger a double email if commit failed.
     try {
       // 1️⃣ Ensure file exists
       await fs.access(filePath);
@@ -89,18 +90,20 @@ const worker = new Worker(
 
       // 5️⃣ Update invoice status
       await Invoice.update(
-        { status: "sent", sent_at: new Date() },
-        { where: { id: invoiceId }, transaction }
+        { status: "sent", sent_at: new Date(), send_error: null },
+        { where: { id: invoiceId } }
       );
-
-      await transaction.commit();
 
       return { invoiceId };
     } catch (error) {
-      await transaction.rollback();
-
+      // Only mark 'failed' once BullMQ has no retries left — otherwise the
+      // record would flip failed → sent and pollers would stop too early.
+      const isLastAttempt = job.attemptsMade + 1 >= (job.opts?.attempts || 1);
       await Invoice.update(
-        { status: "failed" },
+        {
+          status: isLastAttempt ? "failed" : "pending",
+          send_error: String(error?.message || error).slice(0, 1000),
+        },
         { where: { id: invoiceId } }
       );
 
@@ -110,6 +113,12 @@ const worker = new Worker(
   {
     connection,
     concurrency: 3,
+    // Bulk uploads can queue hundreds of emails at once — throttle so the
+    // SMTP provider doesn't start rejecting us. Tune with INVOICE_MAILS_PER_MINUTE.
+    limiter: {
+      max: Number(process.env.INVOICE_MAILS_PER_MINUTE) || 60,
+      duration: 60_000,
+    },
   }
 );
 
