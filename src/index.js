@@ -132,6 +132,16 @@ app.use("/api/erb/report",      reportRoutes);
 app.use("/api/erb/application", applicationRoutes);
 app.use("/api/erb/invoice",     invoiceRoutes);
 
+// ── Bull Board queue dashboard (optional) ─────────────────────────
+// Loaded dynamically so the API still starts if the @bull-board
+// packages aren't installed yet. Must be mounted before the 404 fallback.
+try {
+  const { default: mountBullBoard } = await import("./bullBoard.js");
+  mountBullBoard(app);
+} catch (err) {
+  console.warn("[bull-board] not mounted:", err.message);
+}
+
 // ── Payment-update webhook (called by VM1 payment watcher) ───────
 const WATCHER_SECRET = 'bnNlbmdpeXVudmE6a2luZ0AjMjAyME5TRQ==';
 

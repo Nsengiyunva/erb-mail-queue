@@ -2,7 +2,7 @@ import express       from 'express'
 import multer        from 'multer'
 import fs             from 'fs'
 import cors           from 'cors'
-import { Op }          from 'sequelize'
+import { Op, QueryTypes } from 'sequelize'
 import { sequelize }  from '../config/database.js'
 import InvoiceModel   from '../models/Invoice.js'
 import { DataTypes }  from 'sequelize'
@@ -61,8 +61,15 @@ const bulkUpload = multer({
   },
 })
 
-// Same options for every invoice email job (single, resend, bulk)
-const JOB_OPTS = { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
+// Same options for every invoice email job (single, resend, bulk).
+// Keep recent history in Redis so the Email Queue monitor can show it
+// (removeOnComplete: true deleted every job the moment it succeeded).
+const JOB_OPTS = {
+  attempts: 3,
+  backoff: { type: 'exponential', delay: 5000 },
+  removeOnComplete: { count: 1000, age: 7 * 24 * 3600 },
+  removeOnFail:     { count: 5000, age: 30 * 24 * 3600 },
+}
 
 const queueInvoiceEmail = (invoice) => invoiceQueue.add('send-invoice', {
   invoiceId:     invoice.id,
@@ -188,6 +195,230 @@ router.get('/', async (req, res) => {
   } catch (error) {
     console.error('Invoice list failed:', error)
     res.status(500).json({ message: 'Failed to fetch invoices' })
+  }
+})
+
+
+// ══════════════════════════════════════════════════════════════════
+//  TRACKER + QUEUE MONITOR
+//  GET  /stats                 → status totals + sent/failed per day
+//  POST /resend-failed         → re-queue every failed invoice
+//  GET  /queue                 → live BullMQ snapshot (counts, jobs, workers)
+//  POST /queue/pause|resume    → hold / release the invoice queue
+//  POST /queue/retry-failed    → retry BullMQ's own failed jobs
+//  These MUST stay above the `/:id` routes or Express matches them as ids.
+// ══════════════════════════════════════════════════════════════════
+
+// Invoice timestamps are stored in UTC by Sequelize; bucket days in EAT.
+const TZ = '+03:00'
+const LOCAL_NOW = `CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '${TZ}')`
+const toInt = (v) => Number(v) || 0
+
+// ── GET /stats?days=30 ───────────────────────────────────────────
+router.get('/stats', async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365)
+    const sentLocal    = `CONVERT_TZ(sent_at, '+00:00', '${TZ}')`
+    const updatedLocal = `CONVERT_TZ(updated_at, '+00:00', '${TZ}')`
+
+    const [totals] = await sequelize.query(
+      `SELECT
+         COUNT(*)                                                                    AS total,
+         COALESCE(SUM(status = 'sent'), 0)                                           AS sent,
+         COALESCE(SUM(status = 'failed'), 0)                                         AS failed,
+         COALESCE(SUM(status = 'pending'), 0)                                        AS pending,
+         COALESCE(SUM(status = 'saved'), 0)                                          AS saved,
+         COALESCE(SUM(status = 'sent' AND DATE(${sentLocal}) = DATE(${LOCAL_NOW})), 0)                      AS sent_today,
+         COALESCE(SUM(status = 'sent' AND DATE(${sentLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL 6 DAY), 0)    AS sent_week,
+         COALESCE(SUM(status = 'sent' AND DATE(${sentLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL 29 DAY), 0)   AS sent_month,
+         COALESCE(SUM(status = 'pending' AND updated_at < UTC_TIMESTAMP() - INTERVAL 30 MINUTE), 0)        AS stuck_pending
+       FROM erb_invoices`,
+      { type: QueryTypes.SELECT }
+    )
+
+    const [sentDaily, failedDaily] = await Promise.all([
+      sequelize.query(
+        `SELECT DATE_FORMAT(${sentLocal}, '%Y-%m-%d') AS day, COUNT(*) AS n
+           FROM erb_invoices
+          WHERE status = 'sent' AND sent_at IS NOT NULL
+            AND DATE(${sentLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL :d DAY
+          GROUP BY day`,
+        { type: QueryTypes.SELECT, replacements: { d: days - 1 } }
+      ),
+      sequelize.query(
+        `SELECT DATE_FORMAT(${updatedLocal}, '%Y-%m-%d') AS day, COUNT(*) AS n
+           FROM erb_invoices
+          WHERE status = 'failed'
+            AND DATE(${updatedLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL :d DAY
+          GROUP BY day`,
+        { type: QueryTypes.SELECT, replacements: { d: days - 1 } }
+      ),
+    ])
+
+    const byDay = {}
+    for (const r of sentDaily)   byDay[r.day] = { date: r.day, sent: toInt(r.n), failed: 0 }
+    for (const r of failedDaily) {
+      byDay[r.day] = byDay[r.day] || { date: r.day, sent: 0, failed: 0 }
+      byDay[r.day].failed = toInt(r.n)
+    }
+
+    res.json({
+      days,
+      totals: {
+        total:   toInt(totals.total),
+        sent:    toInt(totals.sent),
+        failed:  toInt(totals.failed),
+        pending: toInt(totals.pending),
+        saved:   toInt(totals.saved),
+      },
+      sent_today:    toInt(totals.sent_today),
+      sent_week:     toInt(totals.sent_week),
+      sent_month:    toInt(totals.sent_month),
+      stuck_pending: toInt(totals.stuck_pending),
+      daily: Object.values(byDay).sort((a, b) => a.date.localeCompare(b.date)),
+    })
+  } catch (error) {
+    console.error('Invoice stats failed:', error)
+    res.status(500).json({ message: 'Failed to load invoice stats' })
+  }
+})
+
+// ── POST /resend-failed  body: { batch_id?, includeStuck? } ──────
+// Uses the same queueInvoiceEmail() as single resend, so the worker
+// gets the full payload (email, filePath, …) it expects.
+router.post('/resend-failed', async (req, res) => {
+  try {
+    const { batch_id, includeStuck } = req.body || {}
+
+    const statusWhere = includeStuck
+      ? { [Op.or]: [
+          { status: 'failed' },
+          { status: 'pending', updated_at: { [Op.lt]: new Date(Date.now() - 30 * 60 * 1000) } },
+        ] }
+      : { status: 'failed' }
+
+    const invoices = await Invoice.findAll({
+      where: { ...statusWhere, ...(batch_id ? { batch_id } : {}) },
+      order: [['id', 'ASC']],
+    })
+
+    const queued = []
+    const skipped = []
+    for (const invoice of invoices) {
+      if (!invoice.email) { skipped.push({ id: invoice.id, reason: 'No email address' }); continue }
+      if (!invoice.file_path || !fs.existsSync(invoice.file_path)) {
+        skipped.push({ id: invoice.id, reason: 'PDF no longer on server — regenerate and send' })
+        continue
+      }
+      await invoice.update({ status: 'pending', send_error: null })
+      await queueInvoiceEmail(invoice)
+      queued.push(invoice.id)
+    }
+
+    res.json({
+      queued: queued.length,
+      skipped: skipped.length,
+      skippedDetails: skipped,
+      message: queued.length
+        ? `Queued ${queued.length} invoice(s) for resending${skipped.length ? `, skipped ${skipped.length}` : ''}`
+        : skipped.length ? `Nothing queued — ${skipped.length} invoice(s) could not be resent` : 'No failed invoices to resend',
+    })
+  } catch (error) {
+    console.error('Resend failed invoices failed:', error)
+    res.status(500).json({ message: 'Failed to queue failed invoices' })
+  }
+})
+
+// ── GET /queue — live snapshot for the Email Queue monitor ───────
+const serializeJob = (job, state) => ({
+  id:           job.id,
+  name:         job.name,
+  state,
+  invoiceId:    job.data?.invoiceId ?? null,
+  attemptsMade: job.attemptsMade,
+  attempts:     job.opts?.attempts || 1,
+  progress:     job.progress,
+  failedReason: job.failedReason || null,
+  createdAt:    job.timestamp || null,
+  processedOn:  job.processedOn || null,
+  finishedOn:   job.finishedOn || null,
+  // Job payload already carries these — no extra DB lookup needed
+  invoice: {
+    invoice_no:    job.data?.invoiceNo || null,
+    engineer_name: job.data?.engineerName || null,
+    email:         job.data?.email || null,
+  },
+})
+
+router.get('/queue', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100)
+    const q = invoiceQueue
+
+    const [counts, isPaused, active, waiting, delayed, failed, completed] = await Promise.all([
+      q.getJobCounts('waiting', 'active', 'completed', 'failed', 'delayed', 'paused', 'prioritized'),
+      q.isPaused(),
+      q.getJobs(['active'], 0, limit - 1),
+      q.getJobs(['waiting', 'prioritized'], 0, limit - 1, true),  // oldest first = next to run
+      q.getJobs(['delayed'], 0, limit - 1, true),
+      q.getJobs(['failed'], 0, limit - 1),
+      q.getJobs(['completed'], 0, limit - 1),
+    ])
+
+    counts.waiting = (counts.waiting || 0) + (counts.prioritized || 0)
+
+    let workers = null
+    try { workers = (await q.getWorkers()).length } catch { /* CLIENT LIST not permitted */ }
+
+    const pack = (list, state) => list.filter(Boolean).map(j => serializeJob(j, state))
+    res.json({
+      name: q.name,
+      isPaused,
+      workers,
+      counts,
+      jobs: {
+        active:    pack(active, 'active'),
+        waiting:   pack(waiting, 'waiting'),
+        delayed:   pack(delayed, 'delayed'),
+        failed:    pack(failed, 'failed'),
+        completed: pack(completed, 'completed'),
+      },
+      at: Date.now(),
+    })
+  } catch (error) {
+    console.error('Invoice queue snapshot failed:', error)
+    res.status(500).json({ message: 'Could not read the email queue (is Redis reachable?)' })
+  }
+})
+
+router.post('/queue/pause', async (_req, res) => {
+  try { await invoiceQueue.pause(); res.json({ isPaused: true }) }
+  catch (e) { res.status(500).json({ message: e.message }) }
+})
+
+router.post('/queue/resume', async (_req, res) => {
+  try { await invoiceQueue.resume(); res.json({ isPaused: false }) }
+  catch (e) { res.status(500).json({ message: e.message }) }
+})
+
+// Retry jobs BullMQ has given up on (all attempts used)
+router.post('/queue/retry-failed', async (_req, res) => {
+  try {
+    const failed = (await invoiceQueue.getJobs(['failed'], 0, 999)).filter(Boolean)
+    let retried = 0
+    const ids = []
+    for (const job of failed) {
+      try {
+        await job.retry()
+        retried++
+        if (job.data?.invoiceId) ids.push(job.data.invoiceId)
+      } catch { /* job removed or locked — skip */ }
+    }
+    if (ids.length) await Invoice.update({ status: 'pending', send_error: null }, { where: { id: ids } })
+    res.json({ retried, message: `Retried ${retried} job(s)` })
+  } catch (error) {
+    console.error('Queue retry-failed failed:', error)
+    res.status(500).json({ message: 'Failed to retry jobs' })
   }
 })
 
@@ -506,7 +737,7 @@ router.post('/send-invoice', upload.single('file'), async (req, res) => {
         financialYear: invoice.financial_year,
         totalAmount:   invoice.total_amount,
       },
-      { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: true, removeOnFail: false }
+      JOB_OPTS
     )
 
     await tx.commit()
