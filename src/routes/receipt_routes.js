@@ -11,6 +11,7 @@ import receiptQueue  from '../queues/receipt_queue.js'
 import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalApprovedReceipt, sendRenewalRejectedNotice, maybeSendReceiptEmail } from '../controllers/receipt-controller.js'
 import { parseReceiptWorkbook }        from '../utils/receipt-excel.js'
 import { generateEngineerReceiptPdf }  from '../utils/receipt-pdf.js'
+import { getLicenceStatus }            from '../utils/licence-status.js'
 
 const router  = express.Router()
 const Receipt = ReceiptModel(sequelize, DataTypes)
@@ -281,6 +282,23 @@ router.get('/uploads/:filename', (req, res) => {
     isPdf ? `inline; filename="${filename}"` : `attachment; filename="${filename}"`
   )
   return res.sendFile(filePath)
+})
+
+// ── GET /licence-status?reg_no=1540 ─────────────────────────────────
+// Per-year licence state (this year + next year) for one engineer — see
+// utils/licence-status.js. Drives the engineer dashboard banner and the
+// year picker on the renewal page. The caller's Authorization header is
+// forwarded to data.erb.go.ug's paid-records API.
+router.get('/licence-status', async (req, res) => {
+  const regNo = String(req.query.reg_no || '').trim()
+  if (!regNo) return res.status(400).json({ message: 'reg_no is required' })
+  try {
+    const status = await getLicenceStatus(regNo, req.headers.authorization)
+    return res.json(status)
+  } catch (err) {
+    console.error('[GET /licence-status]', err.message)
+    return res.status(500).json({ message: 'Could not check licence status' })
+  }
 })
 
 // ── GET /renewals ────────────────────────────────────────────────────

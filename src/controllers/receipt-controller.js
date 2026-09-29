@@ -7,6 +7,7 @@ import { generateReceiptPdf } from '../utils/receipt-pdf.js'
 import paymentReceiptQueue    from '../queues/payment_receipt_queue.js'
 import { sendStyledMail }     from '../utils/mailer.js'
 import { resolveQuotedFee }   from '../utils/fee-schedule.js'
+import { parseRenewalYear, currentYear, renewalAlreadyCovered } from '../utils/licence-status.js'
 
 // ── Model ─────────────────────────────────────────────────────────
 export const PaymentTransaction = sequelize.define('PaymentTransaction', {
@@ -58,6 +59,11 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   renewal_reviewed_by:    { type: DataTypes.STRING(200) },
   renewal_reviewed_at:    { type: DataTypes.DATE },
   renewal_review_comment: { type: DataTypes.TEXT },
+  // Licence year a RENEWAL payment is for (e.g. 2027 when an engineer who
+  // already holds a 2026 licence renews early). Null on rows created
+  // before this column existed — those are treated as the year they
+  // were created in (see utils/licence-status.js).
+  renewal_year:           { type: DataTypes.INTEGER },
   // ── Added for admin-initiated manual status changes on the Payment
   // Tracker (Success / Failed / Deleted) ──────────────────────────
   // Distinct from renewal_reviewed_by/at above (which is specific to the
@@ -348,7 +354,7 @@ export const saveTransaction = async (req, res) => {
     application_id, transaction_ref, phone,
     provider, amount, applicant_name, applicant_id, status,
     purpose, payment_method, registration_number, email,
-    quoted_amount, category,
+    quoted_amount, category, renewal_year,
   } = req.body
 
   if (!application_id || !transaction_ref) {
@@ -366,6 +372,11 @@ export const saveTransaction = async (req, res) => {
     // save (e.g. a client-side retry of the exact same request) — only
     // seed it the first time a RENEWAL transaction is created.
     const existing = await PaymentTransaction.findOne({ where: { transaction_ref } })
+
+    // Out-of-range years are ignored rather than rejected: by the time the
+    // MoMo flow calls this, the payment prompt has already gone out.
+    const parsedYear = parseRenewalYear(renewal_year)
+    const resolvedRenewalYear = Number.isNaN(parsedYear) ? null : parsedYear
     const resolvedRenewalStatus = resolvedPurpose === 'RENEWAL'
       ? (existing?.renewal_status || 'PENDING')
       : (existing?.renewal_status ?? null)
@@ -389,6 +400,9 @@ export const saveTransaction = async (req, res) => {
       // call that doesn't resend it) rather than wiping a good value.
       quoted_amount:  quoted_amount ?? existing?.quoted_amount ?? null,
       fee_category:   category || existing?.fee_category || null,
+      renewal_year:   resolvedPurpose === 'RENEWAL'
+        ? (resolvedRenewalYear || existing?.renewal_year || currentYear())
+        : (existing?.renewal_year ?? null),
     })
 
     res.json({ saved: true })
@@ -426,7 +440,7 @@ export const submitReceiptPayment = async (req, res) => {
     const {
       applicant_id, applicant_name, phone,
       registration_number, amount, transaction_ref, email,
-      quoted_amount, category,
+      quoted_amount, category, renewal_year,
     } = req.body
 
     if (!req.file) {
@@ -435,6 +449,25 @@ export const submitReceiptPayment = async (req, res) => {
     if (!applicant_id || !registration_number) {
       fs.unlink(req.file.path, () => {})
       return res.status(400).json({ message: 'applicant_id and registration_number are required' })
+    }
+
+    const parsedYear = parseRenewalYear(renewal_year)
+    if (Number.isNaN(parsedYear)) {
+      fs.unlink(req.file.path, () => {})
+      return res.status(400).json({ message: `Renewals can only be paid for ${currentYear()} or ${currentYear() + 1}` })
+    }
+    const renewalYear = parsedYear || currentYear()
+
+    // Don't take a second payment for a year that's already licensed,
+    // approved or waiting on review.
+    try {
+      const covered = await renewalAlreadyCovered(registration_number, renewalYear, req.headers.authorization)
+      if (covered) {
+        fs.unlink(req.file.path, () => {})
+        return res.status(409).json({ message: covered })
+      }
+    } catch (e) {
+      console.warn('[renewal-payment] licence-status check skipped:', e.message)
     }
 
     const receiptPath = path.basename(req.file.path)
@@ -457,6 +490,7 @@ export const submitReceiptPayment = async (req, res) => {
       renewal_status:      'PENDING',
       quoted_amount:       quoted_amount ? parseInt(quoted_amount, 10) : null,
       fee_category:        category || null,
+      renewal_year:        renewalYear,
     })
 
     return res.status(201).json({
@@ -464,6 +498,7 @@ export const submitReceiptPayment = async (req, res) => {
       transaction_ref: ref,
       receipt_path:    receiptPath,
       id:              record?.id,
+      renewal_year:    renewalYear,
     })
 
   } catch (err) {
