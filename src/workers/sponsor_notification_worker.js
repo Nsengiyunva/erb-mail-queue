@@ -27,7 +27,10 @@ const worker = new Worker(
       }
 
       // Idempotent for retries — same pattern as the license-issuance worker.
-      emailLog = await EmailLog.findOne({ where: { job_id: job.id } });
+      // Namespaced — see LOG_ID_PREFIX in application_status_email_worker.js
+      // for why a bare job.id collides with other queues' log rows.
+      const logId = `sponsor:${job.id}`;
+      emailLog = await EmailLog.findOne({ where: { job_id: logId } });
 
       if (emailLog?.status === 'SENT') {
         console.log(`[SponsorNotificationWorker] Job ${job.id} already SENT → skipping`);
@@ -36,7 +39,7 @@ const worker = new Worker(
 
       if (!emailLog) {
         emailLog = await EmailLog.create({
-          job_id: job.id,
+          job_id: logId,
           recipient_email: to,
           status: 'PENDING',
         });

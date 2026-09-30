@@ -7,11 +7,26 @@ const EmailLog = db.sequelize.models.EmailLog;
 
 const PORTAL_URL = 'https://registration.erb.go.ug';
 
+// erb_email_logs is shared by several workers (emailQueue, sponsor
+// notifications, this one), and BullMQ job ids are only unique *within* a
+// queue — every queue counts 1, 2, 3… independently. Looking the log up by
+// the bare job.id meant that once emailQueue had sent its own job "57",
+// this worker's job "57" (e.g. a "sent back for corrections" email) found
+// that SENT row, logged "already SENT → skipping", and silently never
+// emailed the applicant. Namespacing the id makes the idempotency check
+// only ever match this queue's own jobs.
+const LOG_ID_PREFIX = 'appStatus:';
+
+const escapeHtml = (v) => String(v ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+  .replace(/\n/g, '<br/>');
+
 // One template per applicant-facing lifecycle event. Keeping all three
 // in one worker (rather than one queue per event) mirrors how close
 // they are: same recipient, same idempotent EmailLog bookkeeping, only
 // the copy changes.
-function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee }) {
+function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName }) {
   const name         = applicantName || 'Applicant';
   const licenceLabel = applicationType || 'licence';
   const trackingLine = trackingNumber
@@ -41,11 +56,30 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
         <p>Your ${licenceLabel} application has been sent back for some updates before it can proceed.</p>
         ${trackingLine}
         <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px;margin:16px 0;">
-          <p style="margin:0;color:#78350f;"><strong>Reason:</strong> ${reason || 'Please review your application for the requested changes.'}</p>
+          <p style="margin:0;color:#78350f;"><strong>Reason:</strong> ${reason ? escapeHtml(reason) : 'Please review your application for the requested changes.'}</p>
         </div>
         <p>Please log in to the ERB portal, make the requested edits, and resubmit your application.</p>
         <p style="text-align:center;margin:28px 0;">
           <a href="${PORTAL_URL}" style="background-color:#b45309;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Update Application</a>
+        </p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
+  if (type === 'COMMENT') {
+    return {
+      subject: `ERB: New Comment on Your Application${trackingNumber ? ` — ${trackingNumber}` : ''}`,
+      body: `
+        <h2 style="margin-top:0;">Dear ${name},</h2>
+        <p>An ERB officer has added a comment to your ${licenceLabel} application.</p>
+        ${trackingLine}
+        <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin:16px 0;">
+          <p style="margin:0 0 6px;color:#1e3a8a;">${escapeHtml(reason)}</p>
+          <p style="margin:0;color:#3b82f6;font-size:12px;">— ${escapeHtml(authorName || 'ERB Officer')}</p>
+        </div>
+        <p>Log in to the ERB portal and open your application to read the full thread or reply.</p>
+        <p style="text-align:center;margin:28px 0;">
+          <a href="${PORTAL_URL}" style="background-color:#1e40af;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">View Application</a>
         </p>
         <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
     };
@@ -92,12 +126,13 @@ const worker = new Worker(
       await job.updateProgress(10);
 
       if (!to) throw new Error('Missing applicant email');
-      if (!['RECEIVED', 'SENT_BACK', 'APPROVED'].includes(type)) {
+      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'COMMENT'].includes(type)) {
         throw new Error(`Unknown application status email type: ${type}`);
       }
 
       // Idempotent for retries — same pattern as sponsor_notification_worker.js.
-      emailLog = await EmailLog.findOne({ where: { job_id: job.id } });
+      const logId = `${LOG_ID_PREFIX}${job.id}`;
+      emailLog = await EmailLog.findOne({ where: { job_id: logId } });
 
       if (emailLog?.status === 'SENT') {
         console.log(`[ApplicationStatusEmailWorker] Job ${job.id} already SENT → skipping`);
@@ -106,7 +141,7 @@ const worker = new Worker(
 
       if (!emailLog) {
         emailLog = await EmailLog.create({
-          job_id: job.id,
+          job_id: logId,
           recipient_email: to,
           registration_no: job.data.trackingNumber || null,
           status: 'PENDING',

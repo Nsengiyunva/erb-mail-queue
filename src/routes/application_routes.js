@@ -402,10 +402,47 @@ import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt } from "../controllers/receipt-controller.js";
 import { resolveQuotedFee } from "../utils/fee-schedule.js";
+import ApplicationCommentModel from "../models/ApplicationComment.js";
+import { computeApplicationProgress } from "../utils/application-progress.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
 const OldUser = OldUserModel(sequelize, DataTypes);
+const ApplicationComment = ApplicationCommentModel(sequelize, DataTypes);
+
+// Creates erb_application_comments on first boot (only ever creates — never
+// alters/drops an existing table).
+ApplicationComment.sync().catch((err) =>
+  console.error("[ApplicationComment] sync error:", err.message)
+);
+
+// Same role list the receipt routes / TrackPayments.js treat as admin.
+const ADMIN_ROLES = ["REGISTRAR", "CHAIRMAN", "ACCOUNTS", "REGISTRATION"];
+
+const applicantDisplayName = (raw) =>
+  raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" ");
+
+// Appends an entry to an application's comments thread. Best-effort: the
+// thread is a record *of* a decision, never a precondition for it, so a
+// failure here is logged and swallowed rather than failing the decision.
+async function logApplicationEvent(applicationId, { event = "COMMENT", message, author_type = "ADMIN", author_name, author_role, author_id, visibility = "ALL" }) {
+  if (!applicationId || !message || !String(message).trim()) return null;
+  try {
+    return await ApplicationComment.create({
+      application_id: applicationId,
+      event,
+      message:        String(message).trim(),
+      author_type,
+      author_name:    author_name || (author_type === "APPLICANT" ? "Applicant" : "Admin"),
+      author_role:    author_role || null,
+      author_id:      author_id != null ? String(author_id) : null,
+      visibility,
+    });
+  } catch (err) {
+    console.error(`[comments] Failed to log ${event} for application ${applicationId}:`, err.message);
+    return null;
+  }
+}
 
 // Same ERB-##### format the frontend already renders (see
 // SubmittedApplications.js / DisplayApplication.js `String(id).padStart(5,'0')`)
@@ -541,6 +578,7 @@ router.post("/submit-application", async (req, res) => {
      * 1️⃣ Create or reuse application (IDEMPOTENT)
      */
     let application;
+    let resubmittedAfterSendBack = false;
 
     const whereClause = applicationID ? { id: applicationID }  : { applicant_id };
 
@@ -560,11 +598,18 @@ router.post("/submit-application", async (req, res) => {
         { transaction }
       );
     } else {
-      // Optional: update draft data before queue
+      // A sent-back application stays DEFERRED while the applicant is
+      // editing it (every wizard step autosaves through here) so it keeps
+      // showing under "Sent back" for admins — it only re-enters the
+      // pipeline (PENDING → worker) on the genuine final submission.
+      const wasDeferred = String(application.status || "").toUpperCase() === "DEFERRED";
+      const isFinal     = String(payload?.draft_type).toUpperCase() === "COMPLETE";
+      resubmittedAfterSendBack = wasDeferred && isFinal;
+
       await application.update(
         {
           ...payload,
-          status: "PENDING",
+          status: wasDeferred && !isFinal ? "DEFERRED" : "PENDING",
         },
         { transaction }
       );
@@ -590,6 +635,15 @@ router.post("/submit-application", async (req, res) => {
      * into the wizard.
      */
     if (String(payload?.draft_type).toUpperCase() === "COMPLETE") {
+      if (resubmittedAfterSendBack) {
+        logApplicationEvent(application.id, {
+          event:       "RESUBMITTED",
+          message:     "Application corrected and resubmitted by the applicant.",
+          author_type: "APPLICANT",
+          author_name: applicantDisplayName(payload) || "Applicant",
+          author_id:   payload.applicant_id,
+        });
+      }
       try {
         await applicationQueue.add(
           "process-application",
@@ -991,6 +1045,7 @@ router.get("/application/:applicant_id", async (req, res) => {
       positions:   parseCol(raw.positions),
       membership:  parseCol(raw.membership),
       sponsors:    parseCol(raw.sponsors),
+      progress:    computeApplicationProgress(raw, { status: computeEffectiveStatus(raw).status }),
     };
 
     return res.status(200).json({
@@ -1178,18 +1233,38 @@ router.get("/registry", async (req, res) => {
     // i.e. everything that is NOT yet a genuine final submission — the
     // opposite filter from every other tab, which all look at draft_type
     // "COMPLETE" and then narrow by pipeline status.
+    //
+    // DEFERRED ("Sent back") is the other special case: a sent-back
+    // application has its draft_type flipped back to "draft" (so the
+    // applicant can edit it again), so it must be matched on status alone
+    // — and kept OUT of the Drafts tab, which would otherwise swallow it.
+    // (Plain `status != 'DEFERRED'` would also drop NULL-status rows in
+    // SQL, hence the explicit IS NULL branch.)
+    const NOT_DEFERRED = { [Op.or]: [{ status: null }, { status: { [Op.ne]: "DEFERRED" } }] };
+    const DRAFT_WHERE  = { [Op.and]: [{ draft_type: { [Op.ne]: "COMPLETE" } }, NOT_DEFERRED] };
+
     const where = status === "DRAFT"
-      ? { draft_type: { [Op.ne]: "COMPLETE" } }
-      : { draft_type: "COMPLETE", ...(status ? { status } : {}) };
+      ? { ...DRAFT_WHERE }
+      : status === "DEFERRED"
+        ? { status: "DEFERRED" }
+        : status
+          ? { draft_type: "COMPLETE", status }
+          // "All" — every genuine submission, plus sent-back ones.
+          : { [Op.or]: [{ draft_type: "COMPLETE" }, { status: "DEFERRED" }] };
 
     if (search) {
-      where[Op.or] = [
-        { name:           { [Op.like]: `%${search}%` } },
-        { first_name:     { [Op.like]: `%${search}%` } },
-        { surname:        { [Op.like]: `%${search}%` } },
-        { email_address:  { [Op.like]: `%${search}%` } },
-        { type:           { [Op.like]: `%${search}%` } },
-      ];
+      // Wrapped in Op.and so it composes with any Op.or / Op.and already
+      // used by the tab filter above instead of overwriting it.
+      const searchOr = {
+        [Op.or]: [
+          { name:           { [Op.like]: `%${search}%` } },
+          { first_name:     { [Op.like]: `%${search}%` } },
+          { surname:        { [Op.like]: `%${search}%` } },
+          { email_address:  { [Op.like]: `%${search}%` } },
+          { type:           { [Op.like]: `%${search}%` } },
+        ],
+      };
+      where[Op.and] = [...(where[Op.and] || []), searchOr];
     }
 
     const { rows, count } = await Application.findAndCountAll({
@@ -1202,9 +1277,8 @@ router.get("/registry", async (req, res) => {
     // Tab counts are independent of whatever tab/search is currently
     // active — the frontend shows these as badges on the tabs themselves,
     // so they need to reflect the true totals, not the filtered one.
-    const draftCount = await Application.count({
-      where: { draft_type: { [Op.ne]: "COMPLETE" } },
-    });
+    const draftCount = await Application.count({ where: { ...DRAFT_WHERE } });
+    const deferredCount = await Application.count({ where: { status: "DEFERRED" } });
 
     const statusCountRows = await Application.findAll({
       attributes: ["status", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
@@ -1222,7 +1296,7 @@ router.get("/registry", async (req, res) => {
       DRAFT:             draftCount,
       SPONSOR_APPROVED:  countsByStatus.SPONSOR_APPROVED || 0,
       ACCOUNTS_APPROVED: countsByStatus.ACCOUNTS_APPROVED || 0,
-      DEFERRED:          countsByStatus.DEFERRED || 0,
+      DEFERRED:          deferredCount,
       BOARD_APPROVED:    countsByStatus.BOARD_APPROVED || 0,
       REGISTERED:        (countsByStatus.REGISTERED || 0) + (countsByStatus.COMPLETED || 0),
     };
@@ -1243,10 +1317,26 @@ router.get("/registry", async (req, res) => {
       if (!existing || pTime > eTime) latestPaymentByApp[p.application_id] = p;
     }
 
+    // Comments-thread size per row, for the badge on the View button.
+    const commentCountRows = appIds.length
+      ? await ApplicationComment.findAll({
+          attributes: ["application_id", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
+          where: { application_id: { [Op.in]: appIds } },
+          group: ["application_id"],
+          raw: true,
+        }).catch((err) => {
+          console.error("[registry] comment count failed:", err.message);
+          return [];
+        })
+      : [];
+    const commentCountByApp = {};
+    for (const c of commentCountRows) commentCountByApp[String(c.application_id)] = parseInt(c.count, 10) || 0;
+
     const records = rows.map((row) => {
       const raw     = row.toJSON();
       const payment = latestPaymentByApp[String(raw.id)];
       const effective = deriveEffectiveStatus(row, raw);
+      const progress  = computeApplicationProgress(raw, { status: effective.status });
 
       // Accounts has manually confirmed payment for every application that
       // has passed the /accounts_verify stage — accounts_verified_at is
@@ -1264,7 +1354,13 @@ router.get("/registry", async (req, res) => {
         email:             raw.email_address,
         type:              raw.type,
         status:            effective.status,
-        is_draft:          raw.draft_type !== "COMPLETE",
+        // A sent-back application has draft_type "draft" again, but it is
+        // not an ordinary unsubmitted draft — the Status column shows it as
+        // "Sent back", so don't flag it as a draft here.
+        is_draft:          raw.draft_type !== "COMPLETE" && effective.status !== "DEFERRED",
+        progress:          progress.percent,
+        progress_stage:    progress.stage,
+        comments_count:    commentCountByApp[String(raw.id)] || 0,
         // No PaymentTransaction row means no Mobile Money attempt was made —
         // but the applicant may instead have attached a payment receipt
         // (see payment_receipt_path / TITLE_COLUMN_MAP "payment receipt"),
@@ -1310,6 +1406,189 @@ router.get("/registry", async (req, res) => {
   } catch (error) {
     console.error("Failed to fetch application registry:", error);
     return res.status(500).json({ message: "Failed to fetch applications" });
+  }
+});
+
+// ── Comments thread ──────────────────────────────────────────────
+// GET  /:id/comments  → the full thread for one application
+// POST /:id/comments  → add a message to it
+//
+// Shared by admins (Pending Applications detail modal) and the applicant
+// (their own application page). Same soft-auth convention as the receipt
+// routes: admins identify with the `x-user-role` header; an applicant
+// identifies with `x-applicant-id`, which must match the application's
+// applicant_id. Admins can post INTERNAL notes that applicants never see.
+function resolveCommentViewer(req, application) {
+  const role = String(req.headers["x-user-role"] || "").toUpperCase();
+  if (ADMIN_ROLES.includes(role)) return { type: "ADMIN", role };
+  const applicantId = req.headers["x-applicant-id"];
+  if (applicantId && String(applicantId) === String(application.applicant_id)) {
+    return { type: "APPLICANT", role: null, applicantId: String(applicantId) };
+  }
+  return null;
+}
+
+// Decisions recorded before the thread existed only live in the
+// accounts_/defer_/board_ columns. Surface them as read-only entries so the
+// thread isn't empty for older applications — but only when the thread
+// doesn't already hold a logged entry for that same kind of event.
+function legacyDecisionEntries(raw, loggedEvents) {
+  const legacy = [];
+  const add = (event, message, author, at) => {
+    if (!message || loggedEvents.has(event)) return;
+    legacy.push({
+      id:          `legacy-${event}-${raw.id}`,
+      application_id: raw.id,
+      event,
+      message,
+      author_type: "ADMIN",
+      author_name: author || "Admin",
+      author_role: null,
+      visibility:  "ALL",
+      created_at:  at || raw.updated_at,
+      legacy:      true,
+    });
+  };
+  add("PAYMENT_VERIFIED", raw.accounts_comment, raw.accounts_verified_by, raw.accounts_verified_at);
+  add("SENT_BACK",        raw.defer_comment,    raw.deferred_by,          raw.deferred_at);
+  add("BOARD_APPROVED",   raw.board_comment,    raw.board_approved_by,    raw.board_approved_at);
+  return legacy;
+}
+
+router.get("/:id/comments", async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    return res.status(400).json({ message: "A valid numeric application ID is required" });
+  }
+  try {
+    const application = await Application.findOne({ where: { id: req.params.id } });
+    if (!application) return res.status(404).json({ message: "Application not found" });
+
+    const viewer = resolveCommentViewer(req, application);
+    if (!viewer) return res.status(403).json({ message: "You don't have access to this application's comments" });
+
+    const rows = await ApplicationComment.findAll({
+      where: {
+        application_id: application.id,
+        ...(viewer.type === "ADMIN" ? {} : { visibility: "ALL" }),
+      },
+      order: [["created_at", "ASC"], ["id", "ASC"]],
+      raw: true,
+    });
+
+    const loggedEvents = new Set(rows.map((r) => r.event));
+    const comments = [...legacyDecisionEntries(application.toJSON(), loggedEvents), ...rows]
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+    return res.status(200).json({ message: "Comments fetched successfully", viewer: viewer.type, comments });
+  } catch (error) {
+    console.error("Failed to fetch application comments:", error);
+    return res.status(500).json({ message: "Failed to fetch comments" });
+  }
+});
+
+router.post("/:id/comments", async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    return res.status(400).json({ message: "A valid numeric application ID is required" });
+  }
+  try {
+    const { message, author_name, visibility } = req.body || {};
+    const text = String(message || "").trim();
+    if (!text) return res.status(400).json({ message: "Please type a comment first" });
+    if (text.length > 5000) return res.status(400).json({ message: "Comments are limited to 5,000 characters" });
+
+    const application = await Application.findOne({ where: { id: req.params.id } });
+    if (!application) return res.status(404).json({ message: "Application not found" });
+
+    const viewer = resolveCommentViewer(req, application);
+    if (!viewer) return res.status(403).json({ message: "You don't have access to comment on this application" });
+
+    const raw = application.toJSON();
+    const isAdmin = viewer.type === "ADMIN";
+    const finalVisibility = isAdmin && String(visibility).toUpperCase() === "INTERNAL" ? "INTERNAL" : "ALL";
+
+    const comment = await ApplicationComment.create({
+      application_id: application.id,
+      event:          "COMMENT",
+      message:        text,
+      author_type:    viewer.type,
+      author_name:    isAdmin ? (author_name || "Admin") : (applicantDisplayName(raw) || "Applicant"),
+      author_role:    viewer.role,
+      author_id:      isAdmin ? null : viewer.applicantId,
+      visibility:     finalVisibility,
+    });
+
+    // Let the applicant know an officer has written to them. Internal notes
+    // and the applicant's own messages don't email anyone.
+    if (isAdmin && finalVisibility === "ALL" && raw.email_address) {
+      applicationStatusEmailQueue.add(
+        "application-comment-email",
+        {
+          type:            "COMMENT",
+          to:              raw.email_address,
+          applicantName:   applicantDisplayName(raw),
+          trackingNumber:  trackingNumber(application.id),
+          applicationType: raw.type,
+          applicationId:   application.id,
+          reason:          text,
+          authorName:      comment.author_name,
+        },
+        { attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: false }
+      ).catch((err) => console.error(`[comments] Failed to queue comment email for application ${application.id}:`, err.message));
+    }
+
+    return res.status(201).json({ message: "Comment added", comment: comment.toJSON() });
+  } catch (error) {
+    console.error("Failed to add application comment:", error);
+    return res.status(500).json({ message: "Failed to add comment" });
+  }
+});
+
+// ── GET /:id/prior_payment ───────────────────────────────────────
+// Used by the last step of the applicant's wizard (License/forms/SectionF.js)
+// when they're correcting an application that was sent back. If Accounts had
+// already verified the application fee before it was sent back (e.g. the
+// Registration officer sent it back for a document issue), the applicant
+// must NOT be asked to pay again — the wizard shows the verified payment
+// (online reference or the attached receipt) instead of the payment options,
+// and lets them resubmit straight away.
+//
+// "Verified" = accounts_verified_at is set; it is only ever written by
+// /accounts_verify, and an Accounts-stage send-back happens *before* that
+// point, so it correctly never carries a payment Accounts didn't accept.
+router.get("/:id/prior_payment", async (req, res) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    return res.status(400).json({ message: "A valid numeric application ID is required" });
+  }
+  try {
+    const application = await Application.findOne({ where: { id: req.params.id } });
+    if (!application) return res.status(404).json({ message: "Application not found" });
+
+    const viewer = resolveCommentViewer(req, application);
+    if (!viewer) return res.status(403).json({ message: "You don't have access to this application" });
+
+    const raw = application.toJSON();
+    if (!raw.accounts_verified_at) {
+      return res.status(200).json({ carried_over: false });
+    }
+
+    const payment = await PaymentTransaction.findOne({
+      where: { application_id: String(raw.id), status: { [Op.ne]: "DELETED" } },
+      order: [["updatedAt", "DESC"]],
+    });
+
+    return res.status(200).json({
+      carried_over:    true,
+      mode:            payment ? "ONLINE" : (raw.payment_receipt_path ? "RECEIPT" : "VERIFIED"),
+      transaction_ref: payment?.transaction_ref ?? null,
+      amount:          payment?.amount ?? null,
+      payment_date:    payment ? (payment.updatedAt || payment.createdAt) : null,
+      receipt_path:    raw.payment_receipt_path || null,
+      verified_at:     raw.accounts_verified_at,
+      verified_by:     raw.accounts_verified_by || "Accounts",
+    });
+  } catch (error) {
+    console.error("Failed to look up prior payment:", error);
+    return res.status(500).json({ message: "Failed to look up payment" });
   }
 });
 
@@ -1407,6 +1686,7 @@ router.get("/:id", async (req, res) => {
         ...raw,
         ...paymentInfo,
         status:      effective.status,
+        progress:    computeApplicationProgress(raw, { status: effective.status }),
         education:   parseCol(raw.education),
         engineering: parseCol(raw.engineering),
         training:    parseCol(raw.training),
@@ -1459,6 +1739,10 @@ async function verifyApplicationPayment(applicationID, { comment, verified_by })
     accounts_verified_at:  new Date(),
   });
 
+  logApplicationEvent(application.id, {
+    event: "PAYMENT_VERIFIED", message: comment, author_name: verified_by || "Admin", author_role: "ACCOUNTS",
+  });
+
   // Best-effort, non-blocking — the caller's response has already been
   // decided by the time this settles, so a failure here (bad email, PDF
   // generation, mail transport down) is only ever logged, never surfaced
@@ -1493,12 +1777,22 @@ async function deferApplicationForPayment(applicationID, { comment, deferred_by 
     throw err;
   }
 
+  // Sent back → the application is editable again. draft_type is what
+  // the applicant's wizard (License/Application.jsx) checks to decide
+  // whether it's a locked, submitted application ("complete") or a
+  // draft they can keep working on ("draft"). It flips back to COMPLETE
+  // when they resubmit.
   await application.update({
     status:         "DEFERRED",
+    draft_type:     "draft",
     sponsors:       effective.sponsors,
     defer_comment:  comment.trim(),
     deferred_by:    deferred_by || "Admin",
     deferred_at:    new Date(),
+  });
+
+  logApplicationEvent(application.id, {
+    event: "SENT_BACK", message: comment, author_name: deferred_by || "Admin", author_role: "ACCOUNTS",
   });
 
   try {
@@ -1691,6 +1985,10 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
     ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
   });
 
+  logApplicationEvent(application.id, {
+    event: "BOARD_APPROVED", message: comment, author_name: approved_by || "Admin", author_role: "REGISTRATION",
+  });
+
   // ── Mirror the approval onto the legacy old_users table ──────────
   // See models/OldUser.js — the join key (email) and column names are
   // a best guess pending confirmation. Failure here is logged but
@@ -1765,12 +2063,22 @@ async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_
     throw err;
   }
 
+  // Sent back → the application is editable again. draft_type is what
+  // the applicant's wizard (License/Application.jsx) checks to decide
+  // whether it's a locked, submitted application ("complete") or a
+  // draft they can keep working on ("draft"). It flips back to COMPLETE
+  // when they resubmit.
   await application.update({
     status:         "DEFERRED",
+    draft_type:     "draft",
     sponsors:       effective.sponsors,
     defer_comment:  comment.trim(),
     deferred_by:    deferred_by || "Admin",
     deferred_at:    new Date(),
+  });
+
+  logApplicationEvent(application.id, {
+    event: "SENT_BACK", message: comment, author_name: deferred_by || "Admin", author_role: "REGISTRATION",
   });
 
   try {
