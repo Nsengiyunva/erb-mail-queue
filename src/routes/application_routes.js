@@ -1,3 +1,395 @@
+// import express from "express";
+// import fs from "fs";
+// import path from 'path'
+// import multer from "multer";
+// import { sequelize } from "../config/database.js";
+// import { DataTypes } from "sequelize";
+// import ApplicationModel from "../models/Application.js";
+// import applicationQueue from "../queues/application_queue.js";
+
+// const router = express.Router();
+// const Application = ApplicationModel(sequelize, DataTypes);
+
+
+// const UPLOADS_DIR = path.resolve("/home/user1/uploads");
+
+// if (!fs.existsSync(UPLOADS_DIR)) {
+//   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+// }
+
+// const storage = multer.diskStorage({
+//   destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+//   filename: (_req, file, cb) => {
+//     const unique = `${Date.now()}-${file.originalname.replace(/\s+/g, "_")}`;
+//     cb(null, unique);
+//   },
+// });
+
+// const upload = multer({
+//   storage,
+//   limits: { fileSize: 30 * 1024 * 1024 }, // 30 MB
+//   fileFilter: (_req, file, cb) => {
+//     const ALLOWED = [
+//       "application/pdf",
+//       "image/jpeg",
+//       "image/png",
+//       "application/msword",
+//       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+//     ];
+//     ALLOWED.includes(file.mimetype)
+//       ? cb(null, true)
+//       : cb(new Error(`File type not allowed: ${file.mimetype}`));
+//   },
+// })
+
+
+// router.post("/submit-application", async (req, res) => {
+//   const transaction = await sequelize.transaction();
+
+//   try {
+//     const payload = req.body;
+
+//     const {
+//       applicant_id,
+//       email_address,
+//       applicationID
+//     } = payload;
+
+//     if (!applicant_id || !email_address) {
+//       return res.status(400).json({
+//         message: "Applicant ID and Email Address are both required",
+//       });
+//     }
+
+//     /**
+//      * 1️⃣ Create or reuse application (IDEMPOTENT)
+//      */
+//     let application;
+
+//     const whereClause = applicationID ? { id: applicationID }  : { applicant_id };
+
+//     application = await Application.findOne({
+//       where: whereClause,
+//       transaction
+//     });
+
+
+//     //the switch leg-work
+//     if (!application) {
+//       application = await Application.create(
+//         {
+//           ...payload,
+//           status: "PENDING",
+//         },
+//         { transaction }
+//       );
+//     } else {
+//       // Optional: update draft data before queue
+//       await application.update(
+//         {
+//           ...payload,
+//           status: "PENDING",
+//         },
+//         { transaction }
+//       );
+//     }
+
+//     /**
+//      * 2️⃣ Queue processing job
+//      */
+//     await applicationQueue.add(
+//       "process-application",
+//       {
+//         ...payload,
+//         applicationID: application.applicationID || application.id,
+//         dbId: application.id, // 🔥 important for worker reference
+//       },
+//       {
+//         attempts: 3,
+//         backoff: { type: "exponential", delay: 5000 },
+//         removeOnComplete: true,
+//         removeOnFail: false,
+//       }
+//     );
+
+//     await transaction.commit();
+
+//     res.status(201).json({
+//       message: "Application submitted and queued successfully",
+//       applicationId: application.id,
+//     });
+
+//   } catch (error) {
+//     await transaction.rollback();
+
+//     console.error("Application submission failed:", error);
+
+//     res.status(500).json({
+//       message: "Failed to submit application",
+//     });
+//   }
+// })
+
+// router.post(
+//   "/engineer_documents",
+//   upload.single("document"),
+//   async (req, res) => {
+//     try {
+//       const { applicationID, file_title, applicant_id } = req.body;
+
+//       // ── Validate applicationID ──────────────────────────────────────
+//       const parsedID = Number(applicationID);
+//       if (!applicationID || isNaN(parsedID)) {
+//         if (req.file) fs.unlink(req.file.path, () => {});
+//         return res.status(400).json({ message: "A valid applicationID is required" });
+//       }
+
+//       if (!req.file) {
+//         return res.status(400).json({ message: "No file was uploaded" });
+//       }
+
+//       if (!file_title) {
+//         fs.unlink(req.file.path, () => {});
+//         return res.status(400).json({ message: "file_title is required" });
+//       }
+
+//       // ── Map file title to DB column (early — avoids wasted DB call) ─
+//       const TITLE_COLUMN_MAP = {
+//         "technical report": "technical_path",
+//         "career report":    "career_path",
+//       };
+
+//       const normalizedTitle = file_title.toLowerCase().trim();
+//       const column = TITLE_COLUMN_MAP[normalizedTitle];
+
+//       if (!column) {
+//         fs.unlink(req.file.path, () => {});
+//         return res.status(400).json({
+//           message: `Invalid file_title. Accepted values: ${Object.keys(TITLE_COLUMN_MAP).join(", ")}`,
+//         });
+//       }
+
+//       // ── Find application — by id, fallback to applicant_id ──────────
+//       let application = await Application.findOne({
+//         where: { id: parsedID },
+//       });
+
+//       // Fallback: if frontend sent applicant_id instead of application id
+//       if (!application && applicant_id && !isNaN(Number(applicant_id))) {
+//         application = await Application.findOne({
+//           where: { applicant_id: Number(applicant_id) },
+//         });
+//       }
+
+//       if (!application) {
+//         fs.unlink(req.file.path, () => {});
+//         return res.status(404).json({ message: "Application not found" });
+//       }
+
+//       // ── Normalize file path ─────────────────────────────────────────
+//       const filePath = path
+//         .relative(process.cwd(), req.file.path)
+//         .replace(/\\/g, "/");
+
+//       // ── Update application ──────────────────────────────────────────
+//       await application.update({ [column]: filePath });
+
+//       // ── Success ─────────────────────────────────────────────────────
+//       return res.status(200).json({
+//         message:       "Document uploaded successfully",
+//         applicationId: application.id,   // return the real DB id so frontend can store it
+//         filePath,
+//         columnUpdated: column,
+//       });
+
+//     } catch (error) {
+//       if (req.file) fs.unlink(req.file.path, () => {});
+//       console.error("Document upload failed:", error);
+//       return res.status(500).json({
+//         message: error.message || "Failed to upload document",
+//       });
+//     }
+//   }
+// )
+
+// router.get("/get_application_files/:applicationID", async (req, res) => {
+//   try {
+//     const { applicationID } = req.params;
+
+//     if (!applicationID) {
+//       return res.status(400).json({
+//         message: "Application ID is required",
+//       });
+//     }
+
+//     const application = await Application.findOne({
+//       where: { id: applicationID },
+//       attributes: ["id", "applicant_id", "technical_path", "career_path"],
+//     });
+
+//     if (!application) {
+//       return res.status(404).json({
+//         message: "Application not found",
+//       });
+//     }
+
+//     const baseUrl = `${req.protocol}://${req.get("host")}`;
+
+//     const buildFileEntry = (filePath, tag) => {
+//       if (!filePath) return null;
+
+//       const fileName = filePath.split("/").pop(); // e.g. "1775044680791-1638_Receipt.pdf"
+
+//       return {
+//         _id:      `${applicationID}_${tag}`,
+//         name:     fileName,
+//         tag:      tag,
+//         filePath: filePath.replace(/^\.\.\/\.\.\//, ""), // strip leading ../../ for URL use
+//       };
+//     };
+
+//     const files = [
+//       buildFileEntry(application.technical_path, "technical"),
+//       buildFileEntry(application.career_path,    "career"),
+//     ].filter(Boolean); // drop nulls for files not yet uploaded
+
+//     res.status(200).json({
+//       message: "Files fetched successfully",
+//       files,
+//     });
+
+//   } catch (error) {
+//     console.error("Failed to fetch application files:", error);
+
+//     res.status(500).json({
+//       message: "Failed to fetch application files",
+//     });
+//   }
+// });
+
+
+// router.get("/draft/:applicant_id", async (req, res) => {
+//   try {
+//     const { applicant_id } = req.params;
+
+//     if (!applicant_id) {
+//       return res.status(400).json({ message: "Applicant ID is required" });
+//     }
+
+//     const application = await Application.findOne({
+//       where: { applicant_id: Number(applicant_id) },
+//     });
+
+//     if (!application) {
+//       return res.status(200).json({
+//         message: "No application found for this applicant",
+//         application: null,
+//       });
+//     }
+
+//     res.status(200).json({
+//       message: "Application fetched successfully",
+//       application,
+//     });
+
+//   } catch (error) {
+//     console.error("Failed to fetch draft:", error);
+//     res.status(500).json({ message: "Failed to fetch draft" });
+//   }
+// })
+
+// // ── GET /application/:applicant_id ──────────────────────────────
+// // Returns the full application record for a given applicant.
+// // Used by the frontend "View my application" flow to render
+// // the submitted application detail view.
+// router.get("/application/:applicant_id", async (req, res) => {
+//   try {
+//     const applicant_id = Number(req.params.applicant_id);
+
+//     if (!applicant_id || isNaN(applicant_id)) {
+//       return res.status(400).json({ message: "A valid applicant ID is required" });
+//     }
+
+//     const application = await Application.findOne({
+//       where: { applicant_id },
+//     });
+
+//     if (!application) {
+//       return res.status(404).json({
+//         message: "No application found for this applicant",
+//         application: null,
+//       });
+//     }
+
+//     // Parse JSON columns so the frontend receives arrays, not strings
+//     const raw = application.toJSON();
+
+//     const parseCol = (val) => {
+//       if (!val) return [];
+//       if (Array.isArray(val)) return val;
+//       try { return JSON.parse(val); } catch { return []; }
+//     };
+
+//     const result = {
+//       ...raw,
+//       education:   parseCol(raw.education),
+//       engineering: parseCol(raw.engineering),
+//       training:    parseCol(raw.training),
+//       positions:   parseCol(raw.positions),
+//       membership:  parseCol(raw.membership),
+//       sponsors:    parseCol(raw.sponsors),
+//     };
+
+//     return res.status(200).json({
+//       message: "Application fetched successfully",
+//       application: result,
+//     });
+
+//   } catch (error) {
+//     console.error("Failed to fetch application:", error);
+//     return res.status(500).json({ message: "Failed to fetch application" });
+//   }
+// });
+
+
+
+// // ── GET /uploads/:filename ───────────────────────────────────────
+// // Serves uploaded documents (PDFs, images) directly from disk.
+// // The path stored in the DB is relative to cwd, e.g.
+// //   "../../home/user1/uploads/1234567890-report.pdf"
+// // The frontend hits /api/erb/uploads/:filename so we just resolve
+// // the filename against UPLOADS_DIR.
+// router.get("/uploads/:filename", (req, res) => {
+//   const { filename } = req.params;
+
+//   // Guard against path traversal
+//   if (filename.includes("..") || filename.includes("/")) {
+//     return res.status(400).json({ message: "Invalid filename" });
+//   }
+
+//   const filePath = path.join(UPLOADS_DIR, filename);
+
+//   if (!fs.existsSync(filePath)) {
+//     return res.status(404).json({ message: "File not found" });
+//   }
+
+//   // Let the browser decide whether to display inline or download.
+//   // PDFs open inline; other types trigger a download prompt.
+//   const ext = path.extname(filename).toLowerCase();
+//   const isPdf = ext === ".pdf";
+
+//   res.setHeader(
+//     "Content-Disposition",
+//     isPdf ? `inline; filename="${filename}"` : `attachment; filename="${filename}"`
+//   );
+
+//   res.sendFile(filePath);
+// });
+
+// export default router;
+
+
+
 import express from "express";
 import fs from "fs";
 import path from 'path'
@@ -18,7 +410,8 @@ const Application = ApplicationModel(sequelize, DataTypes);
 const OldUser = OldUserModel(sequelize, DataTypes);
 const ApplicationComment = ApplicationCommentModel(sequelize, DataTypes);
 
-
+// Creates erb_application_comments on first boot (only ever creates — never
+// alters/drops an existing table).
 ApplicationComment.sync().catch((err) =>
   console.error("[ApplicationComment] sync error:", err.message)
 );
@@ -29,7 +422,9 @@ const ADMIN_ROLES = ["REGISTRAR", "CHAIRMAN", "ACCOUNTS", "REGISTRATION"];
 const applicantDisplayName = (raw) =>
   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" ");
 
-
+// Appends an entry to an application's comments thread. Best-effort: the
+// thread is a record *of* a decision, never a precondition for it, so a
+// failure here is logged and swallowed rather than failing the decision.
 async function logApplicationEvent(applicationId, { event = "COMMENT", message, author_type = "ADMIN", author_name, author_role, author_id, visibility = "ALL" }) {
   if (!applicationId || !message || !String(message).trim()) return null;
   try {
@@ -49,7 +444,9 @@ async function logApplicationEvent(applicationId, { event = "COMMENT", message, 
   }
 }
 
-
+// Same ERB-##### format the frontend already renders (see
+// SubmittedApplications.js / DisplayApplication.js `String(id).padStart(5,'0')`)
+// — used as the tracking number in every applicant-facing email below.
 const trackingNumber = (id) => `ERB-${String(id).padStart(5, "0")}`;
 
 const parseJsonCol = (val) => {
@@ -59,6 +456,16 @@ const parseJsonCol = (val) => {
 };
 
 // ── Effective status ─────────────────────────────────────────────
+// Policy (shared with application_worker.js and the frontend): an
+// attached recommendation letter IS a sponsor's approval — there's no
+// separate confirmation step. New submissions get this applied at
+// creation time by the worker, but applications submitted before that
+// rule shipped are still sitting on the DB with status
+// AWAITING_SPONSOR_APPROVAL even though every sponsor already has a
+// letter on file. Rather than require a one-off migration, every read
+// path recomputes the true status here — and opportunistically writes
+// the correction back (fire-and-forget) so it only needs recomputing
+// once per stale row.
 function computeEffectiveStatus(raw) {
   if (raw.status !== "AWAITING_SPONSOR_APPROVAL") {
     return { status: raw.status || "PENDING", sponsors: raw.sponsors, changed: false };
@@ -76,7 +483,13 @@ function computeEffectiveStatus(raw) {
   return { status: "SPONSOR_APPROVED", sponsors: JSON.stringify(signedSponsors), changed: true };
 }
 
-
+// Read-only call sites (registry list, detail fetch) use this — it persists
+// the correction as a fire-and-forget write, since nothing else in those
+// requests writes to the same row afterward. board_approve deliberately
+// does NOT use this wrapper: it needs the pure computation so it can fold
+// the sponsor correction into its own single atomic update, rather than
+// risking this fire-and-forget write landing after (and clobbering) the
+// board-approval write.
 function deriveEffectiveStatus(row, raw) {
   const effective = computeEffectiveStatus(raw);
   if (effective.changed) {
@@ -104,6 +517,10 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  // Bumped from 30MB: applicants now merge every supporting document
+  // (UIPE membership, academic certs/transcripts, employment letters,
+  // organogram, CPD, etc.) into a single PDF alongside the Career
+  // Summary Report, so that one file needs more headroom.
   limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
   fileFilter: (_req, file, cb) => {
     const ALLOWED = [
@@ -127,6 +544,12 @@ router.post("/submit-application", async (req, res) => {
   try {
     const payload = req.body;
 
+    // req.body can come back undefined (not even {}) when express.json()
+    // didn't parse the request at all — most commonly because the
+    // incoming Content-Type header wasn't application/json (missing,
+    // wrong value, or stripped by a proxy), or the body exceeded the
+    // parser's size limit. Guard instead of crashing, and log enough to
+    // diagnose which of those it is next time.
     if (!payload || typeof payload !== "object") {
       console.error(
         "[submit-application] req.body missing/invalid — Content-Type:",
@@ -175,6 +598,10 @@ router.post("/submit-application", async (req, res) => {
         { transaction }
       );
     } else {
+      // A sent-back application stays DEFERRED while the applicant is
+      // editing it (every wizard step autosaves through here) so it keeps
+      // showing under "Sent back" for admins — it only re-enters the
+      // pipeline (PENDING → worker) on the genuine final submission.
       const wasDeferred = String(application.status || "").toUpperCase() === "DEFERRED";
       const isFinal     = String(payload?.draft_type).toUpperCase() === "COMPLETE";
       resubmittedAfterSendBack = wasDeferred && isFinal;

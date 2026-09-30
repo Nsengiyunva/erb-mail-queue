@@ -205,7 +205,7 @@ router.get('/transactions', async (req, res) => {
 // Builds the read-only tracker rows for application-form receipts (see
 // GET /transactions above). Status mirrors where Accounts is with it:
 //   SUCCESS   — Accounts verified the payment (accounts_verified_at set)
-//   FAILED    — sent back by Accounts before verification (payment not
+//   CLOSED    — sent back by Accounts before verification (payment not
 //               accepted; a Board-stage send-back happens after
 //               verification, so it keeps SUCCESS)
 //   INITIATED — awaiting Accounts review (shown as "Pending")
@@ -245,7 +245,7 @@ async function applicationReceiptRows({ isAdmin, applicantId, existing }) {
         amount:          fee,
         quoted_amount:   fee,
         erb_fee:         fee,
-        status:          verified ? 'SUCCESS' : rejected ? 'FAILED' : 'INITIATED',
+        status:          verified ? 'SUCCESS' : rejected ? 'CLOSED' : 'INITIATED',
         applicant_name:  a.name || [a.first_name, a.other_names, a.surname].filter(Boolean).join(' '),
         applicant_id:    a.applicant_id,
         email:           a.email_address,
@@ -270,6 +270,8 @@ router.post('/transactions/:id/retry', async (req, res) => {
       return res.status(400).json({ message: 'Transaction already succeeded — no retry needed' })
     if (tx.status === 'DELETED')
       return res.status(400).json({ message: 'This transaction has been deleted and cannot be retried' })
+    if (tx.status === 'CLOSED')
+      return res.status(400).json({ message: 'This transaction has been closed by ERB Accounts and cannot be retried. Please start a new payment.' })
     await tx.update({ status: 'INITIATED' })
     return res.json({ message: 'Transaction reset to INITIATED', id })
   } catch (err) {
@@ -305,7 +307,10 @@ router.post('/transactions/:id/status', async (req, res) => {
 
     const { id } = req.params
     const { status, changed_by, reason } = req.body || {}
-    const ALLOWED = ['SUCCESS', 'FAILED', 'DELETED']
+    // CLOSED = Accounts has rejected this payment and it's finished with:
+    // it stays visible (unlike DELETED) for the record, but can never be
+    // retried, and doesn't count towards collections.
+    const ALLOWED = ['SUCCESS', 'FAILED', 'CLOSED', 'DELETED']
     const normalized = String(status || '').toUpperCase()
 
     if (!ALLOWED.includes(normalized)) {
@@ -404,6 +409,19 @@ router.get('/renewals', async (req, res) => {
       { where: { purpose: 'RENEWAL', renewal_status: null } }
     )
 
+    // Self-heal: renewals Accounts rejected before auto-closing existed
+    // (see POST /renewals/:id/reject) still carry their raw attempt status
+    // (FAILED / INITIATED / SUCCESS) — close them the same way.
+    await PaymentTransaction.update(
+      {
+        status:               'CLOSED',
+        status_changed_by:    'System',
+        status_changed_at:    new Date(),
+        status_change_reason: 'Closed automatically: renewal payment rejected by Accounts',
+      },
+      { where: { purpose: 'RENEWAL', renewal_status: 'REJECTED', status: { [Op.notIn]: ['CLOSED', 'DELETED'] } } }
+    )
+
     const where  = {
       purpose: 'RENEWAL',
       status:  { [Op.ne]: 'DELETED' }, // deleted transactions are hidden everywhere, not just the general tracker
@@ -461,6 +479,14 @@ router.post('/renewals/:id/approve', async (req, res) => {
       renewal_reviewed_by:    reviewed_by || 'Admin',
       renewal_reviewed_at:    new Date(),
       renewal_review_comment: comment?.trim() || null,
+      // Approving a payment that was previously rejected (and so auto-
+      // closed) reopens it as SUCCESS — Accounts has now confirmed it.
+      ...(tx.status === 'CLOSED' ? {
+        status:               'SUCCESS',
+        status_changed_by:    reviewed_by || 'Admin',
+        status_changed_at:    new Date(),
+        status_change_reason: 'Reopened: renewal payment approved by Accounts after an earlier rejection',
+      } : {}),
     })
 
     // Best-effort, non-blocking — the decision itself is already recorded
@@ -502,11 +528,20 @@ router.post('/renewals/:id/reject', async (req, res) => {
       return res.status(400).json({ message: 'This renewal payment has already been approved and cannot be rejected' })
     }
 
+    // Rejecting also CLOSES the transaction in the Payment Tracker, so the
+    // applicant can't "Retry" a payment Accounts has already turned down —
+    // they start a fresh renewal payment instead.
     await tx.update({
       renewal_status:         'REJECTED',
       renewal_reviewed_by:    reviewed_by || 'Admin',
       renewal_reviewed_at:    new Date(),
       renewal_review_comment: comment.trim(),
+      ...(tx.status !== 'DELETED' ? {
+        status:               'CLOSED',
+        status_changed_by:    reviewed_by || 'Admin',
+        status_changed_at:    new Date(),
+        status_change_reason: `Closed automatically: renewal payment rejected by Accounts — ${comment.trim()}`,
+      } : {}),
     })
 
     sendRenewalRejectedNotice(tx, comment.trim()).catch(err =>
@@ -514,9 +549,10 @@ router.post('/renewals/:id/reject', async (req, res) => {
     )
 
     return res.status(200).json({
-      message: 'Renewal payment rejected — the applicant has been notified',
+      message: 'Renewal payment rejected and closed — the applicant has been notified',
       id: tx.id,
       renewal_status: 'REJECTED',
+      status: tx.status,
     })
   } catch (err) {
     console.error('[POST /renewals/:id/reject]', err.message)
