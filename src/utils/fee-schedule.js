@@ -36,3 +36,33 @@ export function resolveQuotedFee(purpose, category) {
   if (!table) return null
   return table[resolveFeeCategory(category)] ?? null
 }
+
+// ── Charged (gateway-inclusive) amount → ERB fee ─────────────────────
+// Online payments are stored at what the payer was actually charged —
+// the ERB fee plus Mobile Money / FlexiPay charges (e.g. UGX 609,150 for a
+// UGX 600,000 Permanent renewal). Admin screens should show the ERB fee.
+// Same table as ERB_FEE_MAP in the frontend TrackPayments.js and in
+// utils/receipt-pdf.js — keep all three in sync.
+export const ERB_FEE_BY_CHARGED = {
+  406100:  400000,    // Application — Permanent / Temporary
+  203050:  200000,    // Application — Technologist
+  101560:  100000,    // Application — Technician
+  1055900: 1040000,   // Registration — Permanent
+  3045700: 3000000,   // Registration — Temporary
+  761450:  750000,    // Registration — Technologist
+  609150:  600000,    // Registration — Technician / Renewal — Permanent
+  1827430: 1800000,   // Renewal — Temporary
+  659920:  650000,    // Renewal — Technologist
+  507650:  500000,    // Renewal — Technician
+}
+
+// Best available ERB fee for a PaymentTransaction row: the quoted_amount
+// recorded at payment time, else the charged → fee table, else the raw
+// amount (already an ERB fee for attached-receipt payments).
+export function erbFeeFor(tx) {
+  if (!tx) return null
+  if (tx.quoted_amount != null) return Number(tx.quoted_amount)
+  const n = Number(tx.amount)
+  if (!Number.isFinite(n)) return null
+  return ERB_FEE_BY_CHARGED[n] ?? n
+}

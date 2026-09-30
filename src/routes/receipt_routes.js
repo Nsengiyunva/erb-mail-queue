@@ -12,6 +12,8 @@ import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalA
 import { parseReceiptWorkbook }        from '../utils/receipt-excel.js'
 import { generateEngineerReceiptPdf }  from '../utils/receipt-pdf.js'
 import { getLicenceStatus }            from '../utils/licence-status.js'
+import { erbFeeFor, resolveQuotedFee }  from '../utils/fee-schedule.js'
+import { Application }                 from '../models/index.js'
 
 const router  = express.Router()
 const Receipt = ReceiptModel(sequelize, DataTypes)
@@ -170,12 +172,90 @@ router.get('/transactions', async (req, res) => {
       limit: 500,
     })
 
-    return res.json({ transactions: rows })
+    const transactions = rows.map(r => {
+      const tx = r.toJSON()
+      return { ...tx, erb_fee: erbFeeFor(tx) }
+    })
+
+    // Receipts attached on the licence-application form (Application
+    // .payment_receipt_path) are proof of payment too, but they never go
+    // through save-transaction, so they had no row here and the applicant's
+    // tracker looked like they'd never paid. Surface each one as a
+    // read-only row — nothing is written to payment_transactions, so the
+    // registry's ONLINE/RECEIPT payment-mode logic is unaffected.
+    const receiptRows = await applicationReceiptRows({
+      isAdmin,
+      applicantId: parseInt(applicantId, 10) || -1,
+      existing: transactions,
+    }).catch(err => {
+      console.error('[GET /transactions] application receipts lookup failed:', err.message)
+      return []
+    })
+
+    const merged = [...transactions, ...receiptRows]
+      .sort((a, b) => new Date(b.createdAt || b.created_at || 0) - new Date(a.createdAt || a.created_at || 0))
+
+    return res.json({ transactions: merged })
   } catch (err) {
     console.error('[GET /transactions]', err.message)
     return res.status(500).json({ message: 'Failed to fetch transactions' })
   }
 })
+
+// Builds the read-only tracker rows for application-form receipts (see
+// GET /transactions above). Status mirrors where Accounts is with it:
+//   SUCCESS   — Accounts verified the payment (accounts_verified_at set)
+//   FAILED    — sent back by Accounts before verification (payment not
+//               accepted; a Board-stage send-back happens after
+//               verification, so it keeps SUCCESS)
+//   INITIATED — awaiting Accounts review (shown as "Pending")
+async function applicationReceiptRows({ isAdmin, applicantId, existing }) {
+  const where = {
+    payment_receipt_path: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] },
+    ...(isAdmin ? {} : { applicant_id: applicantId }),
+  }
+  const apps = await Application.findAll({ where, order: [['updated_at', 'DESC']], limit: 500 })
+
+  // Skip any application that already has a real receipt-type APPLICATION
+  // transaction, so the same receipt never shows twice.
+  const alreadyTracked = new Set(
+    existing
+      .filter(t => String(t.purpose || '').toUpperCase() === 'APPLICATION'
+        && String(t.payment_method || t.provider || '').toUpperCase() === 'RECEIPT')
+      .map(t => String(t.application_id))
+  )
+
+  return apps
+    .map(a => a.toJSON())
+    .filter(a => !alreadyTracked.has(String(a.id)))
+    .map(a => {
+      const verified = !!a.accounts_verified_at
+      const rejected = !verified && String(a.status || '').toUpperCase() === 'DEFERRED'
+      const fee      = resolveQuotedFee('APPLICATION', a.category || a.profession)
+      return {
+        id:              `app-receipt-${a.id}`,
+        virtual:         true, // read-only: no retry / set-status actions
+        source:          'APPLICATION_FORM',
+        purpose:         'APPLICATION',
+        application_id:  String(a.id),
+        transaction_ref: `APP-RCPT-ERB-${String(a.id).padStart(5, '0')}`,
+        provider:        'RECEIPT',
+        payment_method:  'RECEIPT',
+        phone:           null,
+        amount:          fee,
+        quoted_amount:   fee,
+        erb_fee:         fee,
+        status:          verified ? 'SUCCESS' : rejected ? 'FAILED' : 'INITIATED',
+        applicant_name:  a.name || [a.first_name, a.other_names, a.surname].filter(Boolean).join(' '),
+        applicant_id:    a.applicant_id,
+        email:           a.email_address,
+        receipt_path:    a.payment_receipt_path,
+        verified_by:     a.accounts_verified_by || null,
+        createdAt:       a.created_at,
+        updatedAt:       verified ? a.accounts_verified_at : a.updated_at,
+      }
+    })
+}
 
 // ── POST /transactions/:id/retry ──────────────────────────────────
 // Resets a FAILED transaction back to INITIATED so the user can retry
@@ -345,7 +425,10 @@ router.get('/renewals', async (req, res) => {
     ])
 
     return res.json({
-      transactions: rows,
+      // erb_fee = the ERB renewal fee (e.g. 600,000), as opposed to
+      // `amount`, which for online payments is the gateway-inclusive total
+      // actually charged (e.g. 609,150).
+      transactions: rows.map(r => { const tx = r.toJSON(); return { ...tx, erb_fee: erbFeeFor(tx) } }),
       counts: { ALL: all, PENDING: pending, APPROVED: approved, REJECTED: rejected },
     })
   } catch (err) {
