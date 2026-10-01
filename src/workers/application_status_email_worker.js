@@ -26,7 +26,7 @@ const escapeHtml = (v) => String(v ?? '')
 // in one worker (rather than one queue per event) mirrors how close
 // they are: same recipient, same idempotent EmailLog bookkeeping, only
 // the copy changes.
-function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName }) {
+function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays }) {
   const name         = applicantName || 'Applicant';
   const licenceLabel = applicationType || 'licence';
   const trackingLine = trackingNumber
@@ -61,6 +61,42 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
         <p>Please log in to the ERB portal, make the requested edits, and resubmit your application.</p>
         <p style="text-align:center;margin:28px 0;">
           <a href="${PORTAL_URL}" style="background-color:#b45309;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Update Application</a>
+        </p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
+  if (type === 'INACTIVITY_WARNING') {
+    const when = deleteOn
+      ? new Date(deleteOn).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+      : 'in 4 days';
+    return {
+      subject: `ERB: Your Draft Application Will Be Removed Soon${trackingNumber ? ` — ${trackingNumber}` : ''}`,
+      body: `
+        <h2 style="margin-top:0;">Dear ${name},</h2>
+        <p>Your ${licenceLabel} application with the Engineers Registration Board is still a draft and hasn't been updated for 10 days.</p>
+        ${trackingLine}
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px;margin:16px 0;">
+          <p style="margin:0;color:#78350f;">If there's no further activity, this draft will be removed on <strong>${when}</strong>.</p>
+        </div>
+        <p>To keep it, simply log in and continue your application — any progress you save keeps it active.</p>
+        <p style="text-align:center;margin:28px 0;">
+          <a href="${PORTAL_URL}" style="background-color:#b45309;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Continue Application</a>
+        </p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
+  if (type === 'INACTIVITY_DELETED') {
+    return {
+      subject: `ERB: Draft Application Removed Due to Inactivity${trackingNumber ? ` — ${trackingNumber}` : ''}`,
+      body: `
+        <h2 style="margin-top:0;">Dear ${name},</h2>
+        <p>Your draft ${licenceLabel} application has been removed because it wasn't updated for ${idleDays ? `${idleDays} days` : 'more than two weeks'}.</p>
+        ${trackingLine}
+        <p>If you're still interested in registering with the Engineers Registration Board, you're welcome to log in and start your application again at any time.</p>
+        <p style="text-align:center;margin:28px 0;">
+          <a href="${PORTAL_URL}" style="background-color:#1e40af;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Start a New Application</a>
         </p>
         <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
     };
@@ -126,7 +162,7 @@ const worker = new Worker(
       await job.updateProgress(10);
 
       if (!to) throw new Error('Missing applicant email');
-      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'COMMENT'].includes(type)) {
+      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'COMMENT', 'INACTIVITY_WARNING', 'INACTIVITY_DELETED'].includes(type)) {
         throw new Error(`Unknown application status email type: ${type}`);
       }
 

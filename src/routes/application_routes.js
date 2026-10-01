@@ -396,7 +396,7 @@ import fs from "fs";
 import path from 'path'
 import multer from "multer";
 import { sequelize } from "../config/database.js";
-import { DataTypes, Op } from "sequelize";
+import { DataTypes, Op, QueryTypes } from "sequelize";
 import ApplicationModel from "../models/Application.js";
 import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
@@ -416,6 +416,42 @@ const ApplicationComment = ApplicationCommentModel(sequelize, DataTypes);
 ApplicationComment.sync().catch((err) =>
   console.error("[ApplicationComment] sync error:", err.message)
 );
+
+// ── Applicant TIN ────────────────────────────────────────────────
+// TIN isn't captured on the licence application — applicants enter it on
+// their user profile (old_users.tin, the table behind data.erb.go.ug
+// /old/users, edited via EditEngineer.js). Look it up by the applicant's
+// user id (erb_applications.applicant_id), falling back to email. Raw SQL so
+// a missing column/table just yields null instead of breaking the request.
+let tinLookupWarned = false;
+async function lookupApplicantTin(raw) {
+  if (raw?.tin && String(raw.tin).trim()) return String(raw.tin).trim();
+  try {
+    const rows = await sequelize.query(
+      `SELECT tin FROM old_users
+        WHERE (id = :id OR (:email <> '' AND email = :email))
+          AND tin IS NOT NULL AND TRIM(tin) <> ''
+        ORDER BY (id = :id) DESC
+        LIMIT 1`,
+      {
+        replacements: { id: Number(raw?.applicant_id) || -1, email: String(raw?.email_address || "").trim() },
+        type: QueryTypes.SELECT,
+      }
+    );
+    return rows?.[0]?.tin ? String(rows[0].tin).trim() : null;
+  } catch (err) {
+    if (!tinLookupWarned) {
+      tinLookupWarned = true;
+      console.error("[tin] old_users TIN lookup failed (check table/column name):", err.message);
+    }
+    return null;
+  }
+}
+
+// Soft-deleted (inactive draft, see utils/draft-cleanup.js) rows are hidden
+// from every list/lookup. `status` can be NULL on very old rows, and SQL
+// `!=` never matches NULL, hence the explicit IS NULL branch.
+const NOT_SOFT_DELETED = { [Op.or]: [{ status: null }, { status: { [Op.ne]: "DELETED" } }] };
 
 // Same role list the receipt routes / TrackPayments.js treat as admin.
 const ADMIN_ROLES = ["REGISTRAR", "CHAIRMAN", "ACCOUNTS", "REGISTRATION"];
@@ -611,6 +647,12 @@ router.post("/submit-application", async (req, res) => {
         {
           ...payload,
           status: wasDeferred && !isFinal ? "DEFERRED" : "PENDING",
+          // Any save by the applicant is activity: reset the inactivity
+          // clock, and bring back a draft that had been soft-deleted for
+          // inactivity (the applicant is evidently still interested).
+          inactivity_warning_sent_at: null,
+          deleted_at:                 null,
+          deleted_reason:             null,
         },
         { transaction }
       );
@@ -984,8 +1026,10 @@ router.get("/draft/:applicant_id", async (req, res) => {
       return res.status(400).json({ message: "Applicant ID is required" });
     }
 
+    // Soft-deleted (inactive) drafts are hidden — the applicant starts a
+    // fresh form; their first save reuses and restores the same row.
     const application = await Application.findOne({
-      where: { applicant_id: Number(applicant_id) },
+      where: { applicant_id: Number(applicant_id), ...NOT_SOFT_DELETED },
     });
 
     if (!application) {
@@ -1019,7 +1063,7 @@ router.get("/application/:applicant_id", async (req, res) => {
     }
 
     const application = await Application.findOne({
-      where: { applicant_id },
+      where: { applicant_id, ...NOT_SOFT_DELETED },
     });
 
     if (!application) {
@@ -1069,6 +1113,7 @@ router.get("/application/:applicant_id", async (req, res) => {
     const result = {
       ...raw,
       ...payment,
+      tin:         await lookupApplicantTin(raw),
       education:   parseCol(raw.education),
       engineering: parseCol(raw.engineering),
       training:    parseCol(raw.training),
@@ -1270,7 +1315,7 @@ router.get("/registry", async (req, res) => {
     // — and kept OUT of the Drafts tab, which would otherwise swallow it.
     // (Plain `status != 'DEFERRED'` would also drop NULL-status rows in
     // SQL, hence the explicit IS NULL branch.)
-    const NOT_DEFERRED = { [Op.or]: [{ status: null }, { status: { [Op.ne]: "DEFERRED" } }] };
+    const NOT_DEFERRED = { [Op.or]: [{ status: null }, { status: { [Op.notIn]: ["DEFERRED", "DELETED"] } }] };
     const DRAFT_WHERE  = { [Op.and]: [{ draft_type: { [Op.ne]: "COMPLETE" } }, NOT_DEFERRED] };
 
     const where = status === "DRAFT"
@@ -1280,7 +1325,10 @@ router.get("/registry", async (req, res) => {
         : status
           ? { draft_type: "COMPLETE", status }
           // "All" — every genuine submission, plus sent-back ones.
-          : { [Op.or]: [{ draft_type: "COMPLETE" }, { status: "DEFERRED" }] };
+          : { [Op.and]: [
+              { [Op.or]: [{ draft_type: "COMPLETE" }, { status: "DEFERRED" }] },
+              NOT_SOFT_DELETED,
+            ] };
 
     if (search) {
       // Wrapped in Op.and so it composes with any Op.or / Op.and already
@@ -1313,7 +1361,7 @@ router.get("/registry", async (req, res) => {
 
     const statusCountRows = await Application.findAll({
       attributes: ["status", [sequelize.fn("COUNT", sequelize.col("id")), "count"]],
-      where: { draft_type: "COMPLETE" },
+      where: { draft_type: "COMPLETE", ...NOT_SOFT_DELETED },
       group: ["status"],
       raw: true,
     });
@@ -1717,6 +1765,7 @@ router.get("/:id", async (req, res) => {
         ...raw,
         ...paymentInfo,
         status:      effective.status,
+        tin:         await lookupApplicantTin(raw),
         progress:    computeApplicationProgress(raw, { status: effective.status }),
         education:   parseCol(raw.education),
         engineering: parseCol(raw.engineering),

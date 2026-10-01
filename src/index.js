@@ -16,6 +16,7 @@ import applicationRoutes from "./routes/application_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
 import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillAutoVerifiedApplications } from "./controllers/receipt-controller.js";
+import { scheduleDraftCleanup } from "./utils/draft-cleanup.js";
 
 // Workers
 import "./workers/email_workers.js";
@@ -248,4 +249,8 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       console.error("[auto-verify] backfill failed:", err.message)
     );
   }, 10000);
+
+  // Inactive drafts: warn at 10 days idle, soft-delete at 14 (15+ days
+  // idle → immediately). First run ~30s after startup, then every 6 hours.
+  scheduleDraftCleanup();
 });

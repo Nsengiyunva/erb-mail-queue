@@ -213,6 +213,8 @@ router.get('/transactions', async (req, res) => {
 async function applicationReceiptRows({ isAdmin, applicantId, existing }) {
   const where = {
     payment_receipt_path: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] },
+    // soft-deleted inactive drafts are hidden everywhere
+    [Op.or]: [{ status: null }, { status: { [Op.ne]: 'DELETED' } }],
     ...(isAdmin ? {} : { applicant_id: applicantId }),
   }
   const apps = await Application.findAll({ where, order: [['updated_at', 'DESC']], limit: 500 })

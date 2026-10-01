@@ -94,6 +94,13 @@ export default (sequelize, DataTypes) => {
       registration_fee_status:          DataTypes.STRING,
       registration_fee_ref:             DataTypes.STRING,
       registration_fee_paid_at:         DataTypes.DATE,
+      // Inactive-draft cleanup (utils/draft-cleanup.js): a draft untouched
+      // for 10 days gets a warning email; 4 days after that (14 days idle)
+      // — or immediately once a draft is 15+ days idle — it is soft-deleted:
+      // status 'DELETED', hidden everywhere, row kept.
+      inactivity_warning_sent_at: DataTypes.DATE,
+      deleted_at:                 DataTypes.DATE,
+      deleted_reason:             DataTypes.STRING,
       status: {
         type:         DataTypes.STRING,
         defaultValue: 'PENDING',
