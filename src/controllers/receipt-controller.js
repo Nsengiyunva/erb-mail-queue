@@ -1,3 +1,4 @@
+import { formatApplicantName } from '../utils/applicant-name.js'
 import { sequelize } from '../config/database.js'
 import { DataTypes, Op } from 'sequelize'
 import fs             from 'fs'
@@ -72,6 +73,12 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   status_changed_by:      { type: DataTypes.STRING(200) },
   status_changed_at:      { type: DataTypes.DATE },
   status_change_reason:   { type: DataTypes.TEXT },
+  // Set ONLY by the VM1 payment watcher's webhook (index.js
+  // /payment-update, i.e. the "[payment-update] <ref> → SUCCESS" log line)
+  // when it reports this transaction successful. It's the sole signal that
+  // lets an application skip Accounts' Payment review — a client-declared
+  // or admin-overridden SUCCESS never sets it.
+  gateway_confirmed_at:   { type: DataTypes.DATE },
   // ── Added for the SUCCESS → PDF receipt → email pipeline ────────
   // Tracks the *emailing* of the system-generated PDF receipt, separately
   // from `status` (which tracks the payment itself). payment_receipt_worker.js
@@ -262,7 +269,7 @@ export async function sendAccountsVerificationReceipt(application) {
     return
   }
 
-  const applicantName = raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(' ')
+  const applicantName = formatApplicantName(raw)
 
   // Prefer a real PaymentTransaction row (a FlexiPay attempt, or the
   // instant "Attach Receipt" flow) if one exists — it carries the actual
@@ -410,9 +417,13 @@ export const saveTransaction = async (req, res) => {
     // Best-effort, non-blocking — the response above has already gone
     // out, so any failure here is only ever logged, never surfaced as an
     // API error to the caller.
-    maybeSendReceiptEmail(record, { email }).catch(err =>
-      console.error('[save-transaction] receipt pipeline failed:', err.message)
-    )
+    //
+    // No receipt is sent from here. Receipts go out automatically ONLY when
+    // the payment watcher reports the transaction SUCCESS (payment-update
+    // webhook → onConfirmedPaymentUpdate). Every other payment — a SUCCESS
+    // the browser declares when the MoMo prompt is merely sent, a receipt
+    // upload, a failed or pending payment — waits for Accounts to review
+    // and verify it; the receipt is sent from that approval.
 
   } catch (err) {
     console.error('[save-transaction]', err.message)
@@ -588,3 +599,155 @@ export async function sendRenewalRejectedNotice(tx, reason) {
   )
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// Confirmed online payments — auto receipt + skip Accounts review
+// ══════════════════════════════════════════════════════════════════
+// Policy:
+//   • Online (Mobile Money / FlexiPay) payment CONFIRMED successful by the
+//     payment gateway → the applicant gets their receipt by email straight
+//     away, with no Accounts review:
+//       – APPLICATION fee → the application skips "Payment review" and
+//         goes straight to Board review (ACCOUNTS_APPROVED).
+//       – RENEWAL fee     → renewal_status is set to APPROVED.
+//   • Attached receipts, failed or still-pending payments → unchanged:
+//     they wait for Accounts to review before any receipt goes out.
+//
+// "Confirmed" deliberately means the VM1 payment watcher's webhook
+// (POST /api/erb/receipt/payment-update, see index.js) — NOT the
+// `status: 'SUCCESS'` some frontend screens send to /save-transaction the
+// moment the MoMo prompt is *sent* (Renewal/RegistrationInstantPayment.js),
+// before the payer has approved anything on their phone.
+
+const isOnlineTx = (tx) =>
+  String(tx?.payment_method || '').toUpperCase() !== 'RECEIPT' &&
+  String(tx?.provider || '').toUpperCase() !== 'RECEIPT'
+
+let ApplicationCommentRef = null
+async function logAutoEvent(applicationId, message) {
+  try {
+    if (!ApplicationCommentRef) {
+      const { default: ApplicationCommentModel } = await import('../models/ApplicationComment.js')
+      ApplicationCommentRef = sequelize.models.ApplicationComment || ApplicationCommentModel(sequelize, DataTypes)
+    }
+    await ApplicationCommentRef.create({
+      application_id: applicationId,
+      event:          'PAYMENT_VERIFIED',
+      message,
+      author_type:    'SYSTEM',
+      author_name:    'ERB System',
+      visibility:     'ALL',
+    })
+  } catch (err) {
+    console.error(`[auto-verify] could not log thread event for application ${applicationId}:`, err.message)
+  }
+}
+
+// Moves a submitted application from Payment review straight to Board
+// review if its application fee was paid online and confirmed. Safe to call
+// any time, any number of times: it only acts on an application currently
+// in SPONSOR_APPROVED (i.e. submitted and waiting for Accounts) that hasn't
+// been verified yet. Called from the payment webhook (payment confirmed
+// after submission) and from application_worker.js (payment confirmed
+// before the applicant pressed Submit — the usual order in the wizard).
+export async function autoAdvanceIfPaidOnline(applicationId) {
+  if (!applicationId || !/^\d+$/.test(String(applicationId))) return { advanced: false, reason: 'not an application id' }
+
+  const application = await Application.findByPk(applicationId)
+  if (!application) return { advanced: false, reason: 'application not found' }
+  const raw = application.toJSON()
+
+  if (String(raw.status || '').toUpperCase() !== 'SPONSOR_APPROVED') return { advanced: false, reason: `status ${raw.status}` }
+  if (raw.accounts_verified_at) return { advanced: false, reason: 'already verified' }
+
+  // Only transactions the payment watcher itself reported SUCCESS
+  // (gateway_confirmed_at) — never a client-declared or admin-set SUCCESS.
+  const candidates = await PaymentTransaction.findAll({
+    where: {
+      application_id:       String(raw.id),
+      status:               'SUCCESS',
+      gateway_confirmed_at: { [Op.ne]: null },
+      [Op.or]: [{ purpose: 'APPLICATION' }, { purpose: null }],
+    },
+    order: [['updatedAt', 'DESC']],
+  })
+  const paid = candidates.map(c => c.toJSON()).find(isOnlineTx)
+  if (!paid) return { advanced: false, reason: 'no watcher-confirmed online payment' }
+
+  const note = `Payment verified automatically — online payment reported SUCCESS by the payment watcher (ref ${paid.transaction_ref}).`
+  await application.update({
+    status:               'ACCOUNTS_APPROVED',
+    accounts_comment:     note,
+    accounts_verified_by: 'ERB System (online payment)',
+    accounts_verified_at: new Date(),
+  })
+  logAutoEvent(raw.id, note)
+
+  // The receipt itself goes out via maybeSendReceiptEmail on the
+  // transaction (deduplicated by receipt_email_status) — make sure it has.
+  maybeSendReceiptEmail(paid).catch(err =>
+    console.error(`[auto-verify] receipt for ${paid.transaction_ref} failed:`, err.message)
+  )
+
+  console.log(`[auto-verify] Application ${raw.id} → ACCOUNTS_APPROVED (online payment ${paid.transaction_ref})`)
+  return { advanced: true, transaction_ref: paid.transaction_ref }
+}
+
+// Entry point for a gateway-CONFIRMED status change (payment webhook).
+export async function onConfirmedPaymentUpdate(record) {
+  if (!record) return
+  const tx = typeof record.toJSON === 'function' ? record.toJSON() : record
+  if (normaliseStatus(tx.status) !== 'SUCCESS' || !isOnlineTx(tx)) return
+  if (!tx.gateway_confirmed_at) return // only the watcher webhook stamps this
+
+  const purpose = String(tx.purpose || 'APPLICATION').toUpperCase()
+
+  if (purpose === 'RENEWAL') {
+    // Confirmed online renewal → approve without Accounts review, unless
+    // Accounts already made a decision on it.
+    if (!tx.renewal_status || tx.renewal_status === 'PENDING') {
+      await PaymentTransaction.update(
+        {
+          renewal_status:         'APPROVED',
+          renewal_reviewed_by:    'ERB System (online payment)',
+          renewal_reviewed_at:    new Date(),
+          renewal_review_comment: 'Approved automatically — online payment reported SUCCESS by the payment watcher.',
+        },
+        { where: { transaction_ref: tx.transaction_ref } }
+      )
+    }
+  }
+
+  if (purpose === 'RENEWAL') {
+    // Renewal transactions don't always map back to an application row, so
+    // use the renewal email lookup (same as an Accounts approval does).
+    await sendRenewalApprovedReceipt(tx)
+  } else {
+    await maybeSendReceiptEmail(tx)
+  }
+
+  if (purpose === 'APPLICATION') {
+    await autoAdvanceIfPaidOnline(tx.application_id).catch(err =>
+      console.error(`[auto-verify] application ${tx.application_id} not advanced:`, err.message)
+    )
+  }
+}
+
+// Startup catch-up: re-checks applications waiting in Payment review in case
+// the watcher confirmed their payment while erb-helper was down mid-flow.
+// Only ever advances on a watcher-confirmed transaction (gateway_confirmed_at
+// is set exclusively by the webhook), so payments confirmed before this
+// change — which have no stamp — stay with Accounts. Safe to re-run.
+export async function backfillAutoVerifiedApplications() {
+  const waiting = await Application.findAll({
+    where: { status: 'SPONSOR_APPROVED', accounts_verified_at: null },
+    attributes: ['id'],
+  })
+  let advanced = 0
+  for (const a of waiting) {
+    const r = await autoAdvanceIfPaidOnline(a.id).catch(() => ({ advanced: false }))
+    if (r.advanced) advanced++
+  }
+  if (advanced) console.log(`[auto-verify] backfill: ${advanced} application(s) moved to Board review`)
+  return advanced
+}

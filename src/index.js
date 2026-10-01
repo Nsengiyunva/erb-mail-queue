@@ -15,7 +15,7 @@ import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
-import { PaymentTransaction, normaliseStatus, maybeSendReceiptEmail } from "./controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillAutoVerifiedApplications } from "./controllers/receipt-controller.js";
 
 // Workers
 import "./workers/email_workers.js";
@@ -170,6 +170,9 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
       {
         status: dbStatus,
         ...(amount != null ? { amount } : {}),
+        // The watcher reporting SUCCESS is the only thing that may move an
+        // application past Payment review automatically — stamp it.
+        ...(dbStatus === "SUCCESS" ? { gateway_confirmed_at: new Date() } : {}),
       },
       { where: { transaction_ref: String(request_id) } }
     );
@@ -180,9 +183,13 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
       console.log(`[payment-update] DB updated ${request_id} → ${dbStatus} (${affected} row)`);
 
       if (dbStatus === "SUCCESS") {
+        // Gateway-confirmed success: email the receipt and, for online
+        // payments, skip Accounts review (application → Board review,
+        // renewal → approved). Receipt/failed/pending payments are not
+        // touched — see onConfirmedPaymentUpdate in receipt-controller.js.
         const record = await PaymentTransaction.findOne({ where: { transaction_ref: String(request_id) } });
-        maybeSendReceiptEmail(record).catch(err =>
-          console.error(`[payment-update] receipt pipeline failed for ${request_id}:`, err.message)
+        onConfirmedPaymentUpdate(record).catch(err =>
+          console.error(`[payment-update] confirmed-payment pipeline failed for ${request_id}:`, err.message)
         );
       }
     }
@@ -233,4 +240,12 @@ io.on("connection", (socket) => {
 // ── Start ─────────────────────────────────────────────────────────
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on port ${PORT}`);
+
+  // Catch up applications that were already paid online (gateway-confirmed)
+  // but are still waiting in Accounts' Payment review.
+  setTimeout(() => {
+    backfillAutoVerifiedApplications().catch(err =>
+      console.error("[auto-verify] backfill failed:", err.message)
+    );
+  }, 10000);
 });

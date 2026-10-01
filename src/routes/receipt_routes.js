@@ -1,3 +1,4 @@
+import { formatApplicantName } from '../utils/applicant-name.js'
 import express       from 'express'
 import multer        from 'multer'
 import fs            from 'fs'
@@ -246,7 +247,7 @@ async function applicationReceiptRows({ isAdmin, applicantId, existing }) {
         quoted_amount:   fee,
         erb_fee:         fee,
         status:          verified ? 'SUCCESS' : rejected ? 'CLOSED' : 'INITIATED',
-        applicant_name:  a.name || [a.first_name, a.other_names, a.surname].filter(Boolean).join(' '),
+        applicant_name:  formatApplicantName(a),
         applicant_id:    a.applicant_id,
         email:           a.email_address,
         receipt_path:    a.payment_receipt_path,

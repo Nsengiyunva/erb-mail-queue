@@ -391,6 +391,7 @@
 
 
 import express from "express";
+import { formatApplicantName } from "../utils/applicant-name.js";
 import fs from "fs";
 import path from 'path'
 import multer from "multer";
@@ -401,7 +402,7 @@ import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt } from "../controllers/receipt-controller.js";
-import { resolveQuotedFee } from "../utils/fee-schedule.js";
+import { resolveQuotedFee, erbFeeFor } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
 
@@ -420,7 +421,7 @@ ApplicationComment.sync().catch((err) =>
 const ADMIN_ROLES = ["REGISTRAR", "CHAIRMAN", "ACCOUNTS", "REGISTRATION"];
 
 const applicantDisplayName = (raw) =>
-  raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" ");
+  formatApplicantName(raw);
 
 // Appends an entry to an application's comments thread. Best-effort: the
 // thread is a record *of* a decision, never a precondition for it, so a
@@ -677,7 +678,7 @@ router.post("/submit-application", async (req, res) => {
           {
             type:            "RECEIVED",
             to:              payload.email_address,
-            applicantName:   payload.name || [payload.first_name, payload.other_names, payload.surname].filter(Boolean).join(" "),
+            applicantName:   formatApplicantName(payload),
             trackingNumber:  trackingNumber(application.id),
             applicationType: payload.type,
           },
@@ -1037,8 +1038,37 @@ router.get("/application/:applicant_id", async (req, res) => {
       try { return JSON.parse(val); } catch { return []; }
     };
 
+    // Payment summary for the applicant's "View case file" page — the
+    // wizard's payment fields (amount, payment_mode, payment_phone_no, …)
+    // are sent on submit but aren't columns on erb_applications, so they
+    // were always blank there. Built from the latest PaymentTransaction,
+    // or the receipt attached on the form, same rules as GET /:id.
+    const latestPayment = await PaymentTransaction.findOne({
+      where: { application_id: String(raw.id), status: { [Op.notIn]: ["DELETED"] } },
+      order: [["updatedAt", "DESC"]],
+    });
+    const accountsConfirmedPaid = !!raw.accounts_verified_at;
+    const payment = {
+      payment_status: accountsConfirmedPaid
+        ? "SUCCESS"
+        : latestPayment
+          ? normaliseStatus(latestPayment.status)
+          : (raw.payment_receipt_path ? "RECEIPT_UPLOADED" : "NOT_PAID"),
+      payment_mode:    latestPayment ? (String(latestPayment.payment_method || "").toUpperCase() === "RECEIPT" ? "RECEIPT" : "ONLINE") : (raw.payment_receipt_path ? "RECEIPT" : null),
+      // ERB application fee, not the gateway-inclusive amount charged.
+      amount:          latestPayment ? erbFeeFor(latestPayment.toJSON()) : resolveQuotedFee("APPLICATION", raw.category || raw.profession),
+      amount_charged:  latestPayment?.amount ?? null,
+      transaction_id:  latestPayment?.transaction_ref ?? null,
+      payment_phone:   latestPayment?.phone ?? null,
+      payment_provider: latestPayment?.provider ?? null,
+      payment_date:    latestPayment ? (latestPayment.updatedAt || latestPayment.createdAt) : (raw.accounts_verified_at || null),
+      verified_by:     raw.accounts_verified_by || null,
+      verified_at:     raw.accounts_verified_at || null,
+    };
+
     const result = {
       ...raw,
+      ...payment,
       education:   parseCol(raw.education),
       engineering: parseCol(raw.engineering),
       training:    parseCol(raw.training),
@@ -1115,7 +1145,7 @@ router.get("/sponsor_requests/:sponsor_id", async (req, res) => {
 
         return {
           applicationID:  raw.id,
-          applicant_name: raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+          applicant_name: formatApplicantName(raw),
           applicant_email:raw.email_address,
           application_type: raw.type,
           application_status: raw.status,
@@ -1260,6 +1290,7 @@ router.get("/registry", async (req, res) => {
           { name:           { [Op.like]: `%${search}%` } },
           { first_name:     { [Op.like]: `%${search}%` } },
           { surname:        { [Op.like]: `%${search}%` } },
+          { other_names:    { [Op.like]: `%${search}%` } },
           { email_address:  { [Op.like]: `%${search}%` } },
           { type:           { [Op.like]: `%${search}%` } },
         ],
@@ -1350,7 +1381,7 @@ router.get("/registry", async (req, res) => {
 
       return {
         id:                raw.id,
-        applicant_name:    raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" ") || "(unnamed draft)",
+        applicant_name:    formatApplicantName(raw) || "(unnamed draft)",
         email:             raw.email_address,
         type:              raw.type,
         status:            effective.status,
@@ -1801,7 +1832,7 @@ async function deferApplicationForPayment(applicationID, { comment, deferred_by 
       {
         type:            "SENT_BACK",
         to:              raw.email_address,
-        applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        applicantName:   formatApplicantName(raw),
         trackingNumber:  trackingNumber(application.id),
         applicationType: raw.type,
         reason:          comment.trim(),
@@ -2019,7 +2050,7 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
       {
         type:              "APPROVED",
         to:                raw.email_address,
-        applicantName:     raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        applicantName:     formatApplicantName(raw),
         trackingNumber:    trackingNumber(application.id),
         applicationType:   raw.type,
         licenseNumber:     trimmedLicenseNumber,
@@ -2087,7 +2118,7 @@ async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_
       {
         type:            "SENT_BACK",
         to:              raw.email_address,
-        applicantName:   raw.name || [raw.first_name, raw.other_names, raw.surname].filter(Boolean).join(" "),
+        applicantName:   formatApplicantName(raw),
         trackingNumber:  trackingNumber(application.id),
         applicationType: raw.type,
         reason:          comment.trim(),

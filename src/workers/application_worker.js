@@ -1,7 +1,9 @@
+import { formatApplicantName } from '../utils/applicant-name.js';
 import { Worker } from 'bullmq';
 import connection from '../redis/connection.js';
 import * as db from '../models/index.js';
 import sponsorNotificationQueue from '../queues/sponsor_notification_queue.js';
+import { autoAdvanceIfPaidOnline } from '../controllers/receipt-controller.js';
 
 const Application = db.sequelize.models.Application;
 
@@ -111,14 +113,20 @@ const worker = new Worker(
 
       await job.updateProgress(50);
 
+      // Application fee already paid online and confirmed by the gateway
+      // (the wizard takes payment just before Submit)? Then skip Accounts'
+      // Payment review and go straight to Board review. No-op for receipt
+      // uploads and unconfirmed/failed payments.
+      await autoAdvanceIfPaidOnline(application.id).catch(err =>
+        console.error(`[ApplicationWorker] auto payment verification failed for ${application.id}:`, err.message)
+      );
+
       // ── Notify nominated sponsors ─────────────────────────────────
       // Only for a real final submission, and only the first time this
       // application reaches that state (guarded by the status check above
       // plus a deterministic jobId below, so BullMQ retries never
       // duplicate the emails).
-      const applicantName =
-        dbPayload.name ||
-        [dbPayload.first_name, dbPayload.other_names, dbPayload.surname].filter(Boolean).join(' ');
+      const applicantName = formatApplicantName(dbPayload);
 
       for (const sponsor of sponsorsSigned) {
         if (!sponsor?.email_address) continue;
