@@ -130,6 +130,17 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.TEXT,
         allowNull: true,
       },
+
+      // Which invoice template/page this record belongs to:
+      //   'ANNUAL'    — the existing annual-fees invoices (Invoice Records)
+      //   'TEMPORARY' — Temporary Engineer's registration, licence and stamp
+      //                 renewal invoices (Temporary Invoice Records)
+      // For TEMPORARY, `financial_year` holds the renewal year (e.g. "2027").
+      invoice_type: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        defaultValue: "ANNUAL",
+      },
     },
     {
       tableName: "erb_invoices",
@@ -140,6 +151,7 @@ export default (sequelize, DataTypes) => {
         { fields: ["batch_id"] },
         { fields: ["invoice_no"] },
         { fields: ["erb_no", "financial_year"] },
+        { fields: ["invoice_type"] },
       ],
     }
   );

@@ -23,7 +23,18 @@ const worker = new Worker(
       engineerName,
       financialYear,
       totalAmount,
+      invoiceType,
     } = job.data;
+
+    // Same queue/worker for both invoice kinds — only the wording differs.
+    // For TEMPORARY, financialYear carries the renewal year (e.g. "2027").
+    const isTemporary = String(invoiceType || "").toUpperCase() === "TEMPORARY";
+    const introLine = isTemporary
+      ? `Please find attached your ERB temporary engineer's registration, licence and stamp renewal invoice for ${financialYear || ""}.`
+      : `Please find attached your ERB annual fees invoice for FY ${financialYear || ""}.`;
+    const subject = isTemporary
+      ? `RE: ERB TEMPORARY ENGINEER'S INVOICE — REGISTRATION, LICENCE AND STAMP RENEWAL ${financialYear || ""} ${invoiceNo || ""}`
+      : `RE: ERB ANNUAL FEES INVOICE ${invoiceNo || ""}`;
 
     // No DB transaction here: the only write is a single-row UPDATE, and
     // holding a transaction open across the SMTP call tied up a pool
@@ -52,7 +63,7 @@ const worker = new Worker(
 
             <div style="padding: 25px;">
               <h2 style="margin-top: 0;">Dear ${engineerName || "Engineer"}, 📄</h2>
-              <p>Please find attached your ERB annual fees invoice for FY ${financialYear || ""}.</p>
+              <p>${introLine}</p>
 
               <table style="width: 100%; border-collapse: collapse; margin: 16px 0;">
                 <tr>
@@ -83,7 +94,7 @@ const worker = new Worker(
       // 4️⃣ Send mail
       await sendStyledMail(
         email,
-        `RE: ERB ANNUAL FEES INVOICE ${invoiceNo || ""}`.trim(),
+        subject.replace(/\s+/g, " ").trim(),
         htmlContent,
         attachments
       );

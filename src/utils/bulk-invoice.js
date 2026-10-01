@@ -7,6 +7,17 @@ import XLSX from 'xlsx'
 
 export const MAX_BULK_ROWS = 1000
 
+// ── Invoice types ──────────────────────────────────────────────────
+// ANNUAL    → existing annual-fees invoices (Invoice Records)
+// TEMPORARY → Temporary Engineer's registration, licence & stamp renewal
+//             invoices (Temporary Invoice Records). Same table, endpoints,
+//             queue and worker — only the template, defaults and the
+//             "year" rule differ. For TEMPORARY, financial_year holds the
+//             renewal year ("2027") rather than a "2026/2027" FY.
+export const INVOICE_TYPES = ['ANNUAL', 'TEMPORARY']
+export const normaliseInvoiceType = (v) =>
+  String(v || '').trim().toUpperCase() === 'TEMPORARY' ? 'TEMPORARY' : 'ANNUAL'
+
 // Canonical columns, in template order.
 export const TEMPLATE_COLUMNS = [
   { key: 'engineer_name',        label: 'engineer_name',        required: true,  example: 'Eng. John Doe' },
@@ -23,6 +34,24 @@ export const TEMPLATE_COLUMNS = [
   { key: 'invoice_no',           label: 'invoice_no',           required: false, example: '' },
 ]
 
+// Temporary engineers: one line item (registration, licence & stamp
+// renewal for the renewal year) plus any arrears. No surcharge is billed —
+// the 50% late-payment surcharge is only a note on the invoice.
+export const TEMPORARY_TEMPLATE_COLUMNS = [
+  { key: 'engineer_name',   label: 'engineer_name',   required: true,  example: 'Eng. Huang Mengxin' },
+  { key: 'erb_no',          label: 'erb_no',          required: true,  example: 'TR 245' },
+  { key: 'email',           label: 'email',           required: true,  example: 'huang.mengxin@example.com' },
+  { key: 'address',         label: 'address',         required: false, example: 'P.O Box 1234, Kampala' },
+  { key: 'annual_fee_rate', label: 'renewal_fee',     required: false, example: 1800000 },
+  { key: 'arrears_amount',  label: 'arrears_amount',  required: false, example: 0 },
+  { key: 'financial_year',  label: 'renewal_year',    required: false, example: '2027' },
+  { key: 'invoice_date',    label: 'invoice_date',    required: false, example: '2026-10-01' },
+  { key: 'invoice_no',      label: 'invoice_no',      required: false, example: '' },
+]
+
+export const templateColumnsFor = (type) =>
+  normaliseInvoiceType(type) === 'TEMPORARY' ? TEMPORARY_TEMPLATE_COLUMNS : TEMPLATE_COLUMNS
+
 // Header aliases → canonical key. Headers are normalised first
 // (lower-case, non-alphanumerics collapsed to "_"), so "ERB No.",
 // "erb no" and "ERB_NO" all become "erb_no".
@@ -32,10 +61,10 @@ const HEADER_ALIASES = {
   email:         ['email', 'email_address', 'e_mail', 'engineer_s_email', 'engineer_email', 'emails'],
   address:       ['address', 'postal_address', 'box'],
   annual_fee_engineers: ['annual_fee_engineers', 'no_of_engineers', 'number_of_engineers', 'engineers'],
-  annual_fee_rate:      ['annual_fee_rate', 'rate', 'annual_fee', 'annual_fees', 'fee_rate'],
+  annual_fee_rate:      ['annual_fee_rate', 'rate', 'annual_fee', 'annual_fees', 'fee_rate', 'renewal_fee', 'renewal_rate'],
   arrears_amount:       ['arrears_amount', 'arrears', 'arrears_ugx'],
   surcharge_percent:    ['surcharge_percent', 'surcharge', 'surcharge_pct', 'surcharge_rate'],
-  financial_year:       ['financial_year', 'fy', 'billing_year', 'financial_year_billing'],
+  financial_year:       ['financial_year', 'fy', 'billing_year', 'financial_year_billing', 'renewal_year', 'year'],
   arrears_year:         ['arrears_year', 'arrears_fy'],
   invoice_date:         ['invoice_date', 'date'],
   invoice_no:           ['invoice_no', 'invoice_number', 'invoice'],
@@ -51,6 +80,7 @@ export const normaliseHeader = (h) =>
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
 const FY_RE    = /^(\d{4})\s*[/\-]\s*(\d{4})$/
+const YEAR_RE  = /^(\d{4})(?:\.0+)?$/
 
 const isBlank = (v) => v === undefined || v === null || String(v).trim() === ''
 
@@ -140,6 +170,21 @@ export function parseSpreadsheet(buffer, originalName = '') {
 }
 
 // ── Batch-level defaults for blank cells ───────────────────────────
+// Temporary engineers: 2027 renewal at UGX 1,800,000, no surcharge billed.
+export const defaultTemporaryBatchSettings = () => ({
+  invoice_date:         toISODate(new Date()),
+  financial_year:       '2027',
+  arrears_year:         '',
+  annual_fee_engineers: 1,
+  annual_fee_rate:      1800000,
+  arrears_amount:       0,
+  surcharge_percent:    0,
+  invoice_prefix:       'ERB/TEMP/INV/2027/',
+})
+
+export const defaultBatchSettingsFor = (type) =>
+  normaliseInvoiceType(type) === 'TEMPORARY' ? defaultTemporaryBatchSettings() : defaultBatchSettings()
+
 export const defaultBatchSettings = () => ({
   invoice_date:         toISODate(new Date()),
   financial_year:       '2026/2027',
@@ -155,7 +200,8 @@ export const newBatchId = () =>
   `B${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`
 
 // ── Validate + normalise one row ───────────────────────────────────
-export function validateRow(raw, defaults, { autoInvoiceNo } = {}) {
+export function validateRow(raw, defaults, { autoInvoiceNo, invoiceType = 'ANNUAL' } = {}) {
+  const isTemporary = normaliseInvoiceType(invoiceType) === 'TEMPORARY'
   const errors = []
   const warnings = []
   const pick = (k) => (isBlank(raw[k]) ? defaults[k] : raw[k])
@@ -200,13 +246,25 @@ export function validateRow(raw, defaults, { autoInvoiceNo } = {}) {
   data.surcharge_percent    = num('surcharge_percent', 'Surcharge %', { min: 0, max: 100 })
 
   // Years
-  const fy = normaliseFY(pick('financial_year'))
-  data.financial_year = fy.value
-  if (!fy.ok) errors.push(`Financial year "${fy.value}" must look like 2026/2027`)
+  if (isTemporary) {
+    // Renewal year, e.g. 2027
+    const yv = String(pick('financial_year') ?? '').trim()
+    const ym = yv.match(YEAR_RE)
+    data.financial_year = ym ? ym[1] : yv
+    if (!ym || +ym[1] < 2000 || +ym[1] > 2100) errors.push(`Renewal year "${yv}" must be a year like 2027`)
+    data.arrears_year = String(pick('arrears_year') ?? '').trim() || null
+    // Temporary invoices bill a single engineer and no surcharge.
+    data.annual_fee_engineers = 1
+    data.surcharge_percent    = 0
+  } else {
+    const fy = normaliseFY(pick('financial_year'))
+    data.financial_year = fy.value
+    if (!fy.ok) errors.push(`Financial year "${fy.value}" must look like 2026/2027`)
 
-  const ay = normaliseFY(pick('arrears_year'))
-  data.arrears_year = ay.value
-  if (!ay.ok) errors.push(`Arrears year "${ay.value}" must look like 2025/2026`)
+    const ay = normaliseFY(pick('arrears_year'))
+    data.arrears_year = ay.value
+    if (!ay.ok) errors.push(`Arrears year "${ay.value}" must look like 2025/2026`)
+  }
 
   // Date
   const dateVal = pick('invoice_date')
@@ -219,6 +277,8 @@ export function validateRow(raw, defaults, { autoInvoiceNo } = {}) {
   if (!data.invoice_no) errors.push('Invoice number is required')
   if (data.invoice_no.length > 100) errors.push('Invoice number is too long (max 100 characters)')
 
+  data.invoice_type = isTemporary ? 'TEMPORARY' : 'ANNUAL'
+
   const totals = computeTotals(data)
   Object.assign(data, totals)
   if (totals.total_amount <= 0) errors.push('Invoice total is 0 — check the rate / arrears figures')
@@ -228,14 +288,16 @@ export function validateRow(raw, defaults, { autoInvoiceNo } = {}) {
 
 // ── Validate a whole batch (no DB) ─────────────────────────────────
 // rows: [{ row, raw }]. Adds cross-row duplicate checks.
-export function validateBatch(rows, settings, batchId) {
-  const defaults = { ...defaultBatchSettings(), ...settings }
-  const prefix = String(defaults.invoice_prefix || '').trim() || `ERB/INV/${new Date().getFullYear()}/`
+export function validateBatch(rows, settings, batchId, invoiceType = 'ANNUAL') {
+  const type = normaliseInvoiceType(invoiceType)
+  const base = defaultBatchSettingsFor(type)
+  const defaults = { ...base, ...settings }
+  const prefix = String(defaults.invoice_prefix || '').trim() || base.invoice_prefix
   const batchTag = String(batchId).slice(-6)
 
   const results = rows.map(({ row, raw }, i) => {
     const autoInvoiceNo = `${prefix}${batchTag}-${String(i + 1).padStart(4, '0')}`
-    return { row, ...validateRow(raw, defaults, { autoInvoiceNo }) }
+    return { row, ...validateRow(raw, defaults, { autoInvoiceNo, invoiceType: type }) }
   })
 
   // In-file duplicates
@@ -249,7 +311,7 @@ export function validateBatch(rows, settings, batchId) {
     }
     const key = `${r.data.erb_no}|${r.data.financial_year}`.toUpperCase()
     if (r.data.erb_no) {
-      if (seenEngineerFY.has(key)) r.errors.push(`ERB No. ${r.data.erb_no} appears twice for FY ${r.data.financial_year} (also row ${seenEngineerFY.get(key)})`)
+      if (seenEngineerFY.has(key)) r.errors.push(`ERB No. ${r.data.erb_no} appears twice for ${type === 'TEMPORARY' ? 'renewal year' : 'FY'} ${r.data.financial_year} (also row ${seenEngineerFY.get(key)})`)
       else seenEngineerFY.set(key, r.row)
     }
   }
@@ -257,17 +319,32 @@ export function validateBatch(rows, settings, batchId) {
 }
 
 // ── Template workbook / CSV ────────────────────────────────────────
-export function buildTemplate(format = 'xlsx') {
-  const headers = TEMPLATE_COLUMNS.map(c => c.label)
-  const example = TEMPLATE_COLUMNS.map(c => c.example)
+export function buildTemplate(format = 'xlsx', invoiceType = 'ANNUAL') {
+  const isTemporary = normaliseInvoiceType(invoiceType) === 'TEMPORARY'
+  const columns = templateColumnsFor(invoiceType)
+  const headers = columns.map(c => c.label)
+  const example = columns.map(c => c.example)
   const ws = XLSX.utils.aoa_to_sheet([headers, example])
-  ws['!cols'] = TEMPLATE_COLUMNS.map(c => ({ wch: Math.max(c.label.length + 2, 18) }))
+  ws['!cols'] = columns.map(c => ({ wch: Math.max(c.label.length + 2, 18) }))
 
   if (format === 'csv') {
     return { buffer: Buffer.from('\uFEFF' + XLSX.utils.sheet_to_csv(ws), 'utf8'), mime: 'text/csv', ext: 'csv' }
   }
 
-  const notes = XLSX.utils.aoa_to_sheet([
+  const notes = XLSX.utils.aoa_to_sheet(isTemporary ? [
+    ['Column', 'Required', 'Notes'],
+    ['engineer_name', 'Yes', '"Eng." is added automatically if missing'],
+    ['erb_no', 'Yes', 'Temporary registration number, e.g. TR 245'],
+    ['email', 'Yes', 'Several addresses allowed, separated by ; or ,'],
+    ['address', 'No', 'Printed under the engineer name'],
+    ['renewal_fee', 'No', 'UGX. Registration, licence & stamp renewal. Blank = 1,800,000'],
+    ['arrears_amount', 'No', 'UGX. Blank = 0'],
+    ['renewal_year', 'No', 'e.g. 2027. Blank = batch default'],
+    ['invoice_date', 'No', 'YYYY-MM-DD or DD/MM/YYYY. Blank = batch default'],
+    ['invoice_no', 'No', 'Leave blank to auto-generate a unique number'],
+    [],
+    ['Delete the example row before uploading. Only the first sheet is read.'],
+  ] : [
     ['Column', 'Required', 'Notes'],
     ['engineer_name', 'Yes', '"Eng." is added automatically if missing'],
     ['erb_no', 'Yes', 'ERB registration number'],

@@ -9,15 +9,41 @@ import { DataTypes }  from 'sequelize'
 import invoiceQueue   from '../queues/invoice_queue.js'
 import {
   MAX_BULK_ROWS, parseSpreadsheet, validateBatch, buildTemplate,
-  defaultBatchSettings, newBatchId,
+  defaultBatchSettingsFor, newBatchId, normaliseInvoiceType,
 } from '../utils/bulk-invoice.js'
 
 const router  = express.Router()
 const Invoice = InvoiceModel(sequelize, DataTypes)
 
-Invoice.sync({ alter: false }).catch(err =>
-  console.error('[Invoice] sync error:', err.message)
-)
+Invoice.sync({ alter: false })
+  // sync() never adds columns to an existing table, so add invoice_type
+  // (ANNUAL | TEMPORARY) once if it's missing. Existing rows default to
+  // ANNUAL, i.e. stay exactly where they are in Invoice Records.
+  .then(async () => {
+    const qi = sequelize.getQueryInterface()
+    const cols = await qi.describeTable('erb_invoices')
+    if (!cols.invoice_type) {
+      await qi.addColumn('erb_invoices', 'invoice_type', {
+        type: DataTypes.STRING(20), allowNull: false, defaultValue: 'ANNUAL',
+      })
+      await qi.addIndex('erb_invoices', ['invoice_type']).catch(() => {})
+      console.log('[Invoice] added invoice_type column')
+    }
+  })
+  .catch(err => console.error('[Invoice] sync error:', err.message))
+
+// ── Invoice type scoping ──────────────────────────────────────────
+// Every list/stat/bulk endpoint takes ?type=ANNUAL|TEMPORARY (or `type` /
+// `invoice_type` in the body). Omitted → ANNUAL, so the existing Invoice
+// Records page keeps showing exactly what it showed before, untouched.
+// ?type=ALL lists both.
+const typeFrom = (req) => {
+  const raw = req.query?.type ?? req.body?.type ?? req.body?.invoice_type
+  if (String(raw || '').toUpperCase() === 'ALL') return 'ALL'
+  return normaliseInvoiceType(raw)
+}
+const typeWhere = (type) => (type === 'ALL' ? {} : { invoice_type: type })
+const typeSql   = (type) => (type === 'ALL' ? '' : `AND invoice_type = ${sequelize.escape(type)}`)
 
 const FILE_DIR = '/home/user1/ERB/uploads'
 
@@ -73,6 +99,7 @@ const JOB_OPTS = {
 
 const queueInvoiceEmail = (invoice) => invoiceQueue.add('send-invoice', {
   invoiceId:     invoice.id,
+  invoiceType:   invoice.invoice_type || 'ANNUAL',
   email:         invoice.email,
   filePath:      invoice.file_path,
   originalName:  invoice.original_name,
@@ -118,6 +145,10 @@ const buildInvoicePayload = (body) => {
     annual_fee_amount,
     surcharge_amount,
     total_amount,
+    // Only set when the caller says so — an update that doesn't mention the
+    // type (e.g. from the existing Generate Invoice page) never flips a
+    // record between Invoice Records and Temporary Invoice Records.
+    ...((body.invoice_type ?? body.type) ? { invoice_type: normaliseInvoiceType(body.invoice_type ?? body.type) } : {}),
   }
 }
 
@@ -161,7 +192,7 @@ router.get('/', async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100)
     const offset = (page - 1) * limit
 
-    const where = {}
+    const where = { ...typeWhere(typeFrom(req)) }
     if (req.query.search) {
       const term = `%${req.query.search}%`
       where[Op.or] = [
@@ -218,6 +249,7 @@ const toInt = (v) => Number(v) || 0
 router.get('/stats', async (req, res) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365)
+    const tsql = typeSql(typeFrom(req))
     const sentLocal    = `CONVERT_TZ(sent_at, '+00:00', '${TZ}')`
     const updatedLocal = `CONVERT_TZ(updated_at, '+00:00', '${TZ}')`
 
@@ -232,7 +264,8 @@ router.get('/stats', async (req, res) => {
          COALESCE(SUM(status = 'sent' AND DATE(${sentLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL 6 DAY), 0)    AS sent_week,
          COALESCE(SUM(status = 'sent' AND DATE(${sentLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL 29 DAY), 0)   AS sent_month,
          COALESCE(SUM(status = 'pending' AND updated_at < UTC_TIMESTAMP() - INTERVAL 30 MINUTE), 0)        AS stuck_pending
-       FROM erb_invoices`,
+       FROM erb_invoices
+      WHERE 1=1 ${tsql}`,
       { type: QueryTypes.SELECT }
     )
 
@@ -240,7 +273,7 @@ router.get('/stats', async (req, res) => {
       sequelize.query(
         `SELECT DATE_FORMAT(${sentLocal}, '%Y-%m-%d') AS day, COUNT(*) AS n
            FROM erb_invoices
-          WHERE status = 'sent' AND sent_at IS NOT NULL
+          WHERE status = 'sent' AND sent_at IS NOT NULL ${tsql}
             AND DATE(${sentLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL :d DAY
           GROUP BY day`,
         { type: QueryTypes.SELECT, replacements: { d: days - 1 } }
@@ -248,7 +281,7 @@ router.get('/stats', async (req, res) => {
       sequelize.query(
         `SELECT DATE_FORMAT(${updatedLocal}, '%Y-%m-%d') AS day, COUNT(*) AS n
            FROM erb_invoices
-          WHERE status = 'failed'
+          WHERE status = 'failed' ${tsql}
             AND DATE(${updatedLocal}) >= DATE(${LOCAL_NOW}) - INTERVAL :d DAY
           GROUP BY day`,
         { type: QueryTypes.SELECT, replacements: { d: days - 1 } }
@@ -298,7 +331,7 @@ router.post('/resend-failed', async (req, res) => {
       : { status: 'failed' }
 
     const invoices = await Invoice.findAll({
-      where: { ...statusWhere, ...(batch_id ? { batch_id } : {}) },
+      where: { ...statusWhere, ...typeWhere(typeFrom(req)), ...(batch_id ? { batch_id } : {}) },
       order: [['id', 'ASC']],
     })
 
@@ -335,6 +368,7 @@ const serializeJob = (job, state) => ({
   name:         job.name,
   state,
   invoiceId:    job.data?.invoiceId ?? null,
+  invoiceType:  job.data?.invoiceType || 'ANNUAL',
   attemptsMade: job.attemptsMade,
   attempts:     job.opts?.attempts || 1,
   progress:     job.progress,
@@ -435,17 +469,18 @@ router.post('/queue/retry-failed', async (_req, res) => {
 // ══════════════════════════════════════════════════════════════════
 
 // Settings arrive as a JSON string (multipart) or object (JSON body).
-const readSettings = (input) => {
+const readSettings = (input, type = 'ANNUAL') => {
   let s = input
   if (typeof s === 'string') {
     try { s = JSON.parse(s) } catch { s = {} }
   }
-  const allowed = Object.keys(defaultBatchSettings())
+  const defaults = defaultBatchSettingsFor(type)
+  const allowed = Object.keys(defaults)
   const out = {}
   for (const k of allowed) {
     if (s && s[k] !== undefined && s[k] !== null && String(s[k]).trim() !== '') out[k] = s[k]
   }
-  return { ...defaultBatchSettings(), ...out }
+  return { ...defaults, ...out }
 }
 
 // Checks that need the database. Mutates each result's errors/warnings.
@@ -481,7 +516,8 @@ const checkAgainstDb = async (results) => {
     const prior = priorByKey.get(`${r.data.erb_no}|${r.data.financial_year}`.toUpperCase())
     if (prior?.length) {
       const list = prior.map(p => `${p.invoice_no} (${p.status})`).join(', ')
-      r.warnings.push(`Engineer already has an invoice for FY ${r.data.financial_year}: ${list}`)
+      const label = r.data.invoice_type === 'TEMPORARY' ? 'renewal year' : 'FY'
+      r.warnings.push(`Engineer already has an invoice for ${label} ${r.data.financial_year}: ${list}`)
     }
   }
   return results
@@ -497,9 +533,11 @@ const summarise = (results) => ({
 
 // ── GET /bulk/template?format=xlsx|csv ───────────────────────────
 router.get('/bulk/template', (req, res) => {
-  const { buffer, mime, ext } = buildTemplate(req.query.format === 'csv' ? 'csv' : 'xlsx')
+  const type = normaliseInvoiceType(req.query.type)
+  const { buffer, mime, ext } = buildTemplate(req.query.format === 'csv' ? 'csv' : 'xlsx', type)
+  const name = type === 'TEMPORARY' ? 'erb-bulk-temporary-invoice-template' : 'erb-bulk-invoice-template'
   res.setHeader('Content-Type', mime)
-  res.setHeader('Content-Disposition', `attachment; filename="erb-bulk-invoice-template.${ext}"`)
+  res.setHeader('Content-Disposition', `attachment; filename="${name}.${ext}"`)
   res.send(buffer)
 })
 
@@ -534,12 +572,14 @@ router.post('/bulk/validate', (req, res, next) => {
       return res.status(400).json({ message: `Too many rows (${parsed.rows.length}). Maximum is ${MAX_BULK_ROWS} per upload — split the file.` })
     }
 
-    const settings = readSettings(req.body.settings)
+    const invoice_type = normaliseInvoiceType(req.query.type ?? req.body.type ?? req.body.invoice_type)
+    const settings = readSettings(req.body.settings, invoice_type)
     const batch_id = newBatchId()
-    const results  = await checkAgainstDb(validateBatch(parsed.rows, settings, batch_id))
+    const results  = await checkAgainstDb(validateBatch(parsed.rows, settings, batch_id, invoice_type))
 
     res.json({
       batch_id,
+      invoice_type,
       settings,
       file_name:      req.file.originalname,
       unknownHeaders: parsed.unknownHeaders,
@@ -566,9 +606,10 @@ router.post('/bulk/commit', async (req, res) => {
     const already = await Invoice.count({ where: { batch_id } })
     if (already) return res.status(409).json({ message: 'This batch has already been saved. Open it from the send step or Invoice Records.' })
 
-    const settings = readSettings(req.body.settings)
+    const invoice_type = normaliseInvoiceType(req.query.type ?? req.body.type ?? req.body.invoice_type)
+    const settings = readSettings(req.body.settings, invoice_type)
     const results  = await checkAgainstDb(
-      validateBatch(rows.map(r => ({ row: r.row, raw: r.data || {} })), settings, batch_id)
+      validateBatch(rows.map(r => ({ row: r.row, raw: r.data || {} })), settings, batch_id, invoice_type)
     )
 
     const good     = results.filter(r => !r.errors.length)
@@ -578,7 +619,7 @@ router.post('/bulk/commit', async (req, res) => {
 
     const created = await sequelize.transaction(async (transaction) =>
       Invoice.bulkCreate(
-        good.map(r => ({ ...r.data, batch_id, status: 'saved' })),
+        good.map(r => ({ ...r.data, invoice_type, batch_id, status: 'saved' })),
         { transaction, validate: true }
       )
     )
@@ -589,6 +630,7 @@ router.post('/bulk/commit', async (req, res) => {
     res.status(201).json({
       message: `${saved.length} invoice(s) saved`,
       batch_id,
+      invoice_type,
       created: saved,
       createdCount: created.length,
       rejected,
@@ -729,6 +771,7 @@ router.post('/send-invoice', upload.single('file'), async (req, res) => {
     await invoiceQueue.add('send-invoice',
       {
         invoiceId:     invoice.id,
+        invoiceType:   invoice.invoice_type || 'ANNUAL',
         email,
         filePath:      invoice.file_path,
         originalName:  invoice.original_name,
