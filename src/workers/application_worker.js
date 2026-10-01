@@ -66,18 +66,7 @@ const worker = new Worker(
       // Strip applicationID from the DB payload — it is not a column,
       // passing it to create/update would cause another ER_BAD_FIELD_ERROR.
       const { applicationID: _dropped, ...dbPayload } = payload;
-
-      // ── Policy: an attached recommendation letter IS the sponsor's ──
-      // approval — there is no separate confirmation step for the sponsor
-      // to perform. The wizard already refuses to let an applicant submit
-      // unless every nominated sponsor has a letter on file (Application.jsx,
-      // step 4 gate), so by the time a submission reaches this worker,
-      // sponsor sign-off is already complete in substance. Reflect that
-      // immediately — both per-sponsor and on the application's overall
-      // pipeline status — instead of leaving it on AWAITING_SPONSOR_APPROVAL
-      // until someone visits the Sponsor Requests dashboard and clicks
-      // Approve (that manual path still exists and still works, it's just
-      // no longer the only way this status advances).
+      
       const sponsors = parseJsonColumn(dbPayload.sponsors);
       const sponsorsSigned = sponsors.map(sp =>
         sp?.recommendation_letter_path
