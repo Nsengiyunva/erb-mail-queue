@@ -850,6 +850,20 @@ router.post(
       const normalizedTitle = file_title.toLowerCase().trim();
       const column = TITLE_COLUMN_MAP[normalizedTitle];
 
+      // ── Per-document size limits (multer's 50 MB is the overall cap) ─
+      // Keep in sync with maxSizeMB in License/forms/SectionC.js.
+      const MAX_MB_BY_TITLE = {
+        "technical report": 45,
+        "career report":    30,
+      };
+      const maxMB = MAX_MB_BY_TITLE[normalizedTitle];
+      if (maxMB && req.file.size > maxMB * 1024 * 1024) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(413).json({
+          message: `The ${normalizedTitle} must be ${maxMB} MB or less (this file is ${(req.file.size / 1024 / 1024).toFixed(1)} MB). Try compressing the PDF or lowering the scan resolution.`,
+        });
+      }
+
       if (!column) {
         fs.unlink(req.file.path, () => {});
         return res.status(400).json({
