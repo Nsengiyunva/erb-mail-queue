@@ -401,7 +401,7 @@ import ApplicationModel from "../models/Application.js";
 import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
-import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt } from "../controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, advanceIfPaymentAlreadyVerified } from "../controllers/receipt-controller.js";
 import { resolveQuotedFee, erbFeeFor } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
@@ -1292,6 +1292,15 @@ router.post("/sponsor_approve", async (req, res) => {
         ? { status: "SPONSOR_APPROVED" }
         : {}),
     });
+
+    // A resubmission whose fee was already verified before it was sent
+    // back skips Payment review → straight to Board review.
+    if (allApproved) {
+      await advanceIfPaymentAlreadyVerified(application.id).catch((err) =>
+        console.error(`[sponsor_approve] previously-verified advance failed for ${application.id}:`, err.message)
+      );
+      await application.reload().catch(() => {});
+    }
 
     return res.status(200).json({
       message: "Recommendation approved successfully",
@@ -2285,10 +2294,12 @@ router.post("/board_approve_bulk", async (req, res) => {
 // edit-and-resubmit trip goes back through the existing
 // POST /submit-application route (same one the multi-step wizard
 // autosaves through), which unconditionally sets status back to
-// PENDING on every save. That naturally re-enters the normal pipeline
-// (PENDING → sponsor approval → SPONSOR_APPROVED → accounts verify →
-// ACCOUNTS_APPROVED → this review step again) once the applicant
-// resubmits — nothing DEFERRED-specific to unwind.
+// PENDING on every save. That re-enters the pipeline once the applicant
+// resubmits (PENDING → sponsor approval → SPONSOR_APPROVED → …). Because a
+// Board-stage send-back happens AFTER Accounts verified the fee
+// (accounts_verified_at is kept), the resubmission then skips Payment
+// review and goes straight back to ACCOUNTS_APPROVED (this review step) —
+// see advanceIfPaymentAlreadyVerified in receipt-controller.js.
 router.post("/defer", async (req, res) => {
   const { applicationID, comment, deferred_by } = req.body || {};
   try {

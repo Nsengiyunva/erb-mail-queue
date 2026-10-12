@@ -15,7 +15,7 @@ import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
-import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillAutoVerifiedApplications } from "./controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillAutoVerifiedApplications, backfillPreviouslyVerifiedResubmissions } from "./controllers/receipt-controller.js";
 import { scheduleDraftCleanup } from "./utils/draft-cleanup.js";
 
 // Workers
@@ -247,6 +247,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   setTimeout(() => {
     backfillAutoVerifiedApplications().catch(err =>
       console.error("[auto-verify] backfill failed:", err.message)
+    );
+    // Resubmissions (sent back by the Board after payment was verified)
+    // that are still waiting in Payment review → Board review.
+    backfillPreviouslyVerifiedResubmissions().catch(err =>
+      console.error("[auto-verify] previously-verified backfill failed:", err.message)
     );
   }, 10000);
 
