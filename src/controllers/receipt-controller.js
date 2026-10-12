@@ -693,6 +693,58 @@ export async function autoAdvanceIfPaidOnline(applicationId) {
   return { advanced: true, transaction_ref: paid.transaction_ref }
 }
 
+// ── Resubmissions whose payment was already verified ──────────────
+// An application the Board/Registration sent back AFTER Accounts verified
+// the fee keeps accounts_verified_at (send-back never clears it, and an
+// Accounts-stage send-back always happens before verification). When the
+// applicant resubmits, the wizard already shows the fee as paid (GET
+// /:id/prior_payment) — so it must not land in Accounts' Payment review
+// again either: move it straight to Board review (ACCOUNTS_APPROVED).
+// The original verification (comment / by / at) is left untouched.
+export async function advanceIfPaymentAlreadyVerified(applicationId) {
+  if (!applicationId || !/^\d+$/.test(String(applicationId))) return { advanced: false, reason: 'not an application id' }
+
+  const application = await Application.findByPk(applicationId)
+  if (!application) return { advanced: false, reason: 'application not found' }
+  const raw = application.toJSON()
+
+  if (String(raw.status || '').toUpperCase() !== 'SPONSOR_APPROVED') return { advanced: false, reason: `status ${raw.status}` }
+  if (!raw.accounts_verified_at) return { advanced: false, reason: 'payment not previously verified' }
+
+  // Conditional update so two triggers firing together (worker + sponsor
+  // approval, or the startup backfill) can't both log the move.
+  const [count] = await Application.update(
+    { status: 'ACCOUNTS_APPROVED' },
+    { where: { id: raw.id, status: 'SPONSOR_APPROVED' } }
+  )
+  if (!count) return { advanced: false, reason: 'already moved' }
+
+  const verifiedOn = new Date(raw.accounts_verified_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  logAutoEvent(
+    raw.id,
+    `Resubmitted after being sent back. The application fee was already verified by ${raw.accounts_verified_by || 'Accounts'} on ${verifiedOn}, so Payment review was skipped and the application went straight to Board review.`
+  )
+
+  console.log(`[auto-verify] Application ${raw.id} → ACCOUNTS_APPROVED (payment already verified ${raw.accounts_verified_at})`)
+  return { advanced: true }
+}
+
+// Startup catch-up for resubmissions already sitting in Payment review
+// even though their payment was verified before they were sent back.
+export async function backfillPreviouslyVerifiedResubmissions() {
+  const waiting = await Application.findAll({
+    where: { status: 'SPONSOR_APPROVED', accounts_verified_at: { [Op.ne]: null } },
+    attributes: ['id'],
+  })
+  let advanced = 0
+  for (const a of waiting) {
+    const r = await advanceIfPaymentAlreadyVerified(a.id).catch(() => ({ advanced: false }))
+    if (r.advanced) advanced++
+  }
+  if (advanced) console.log(`[auto-verify] backfill: ${advanced} previously-verified resubmission(s) moved to Board review`)
+  return advanced
+}
+
 // Entry point for a gateway-CONFIRMED status change (payment webhook).
 export async function onConfirmedPaymentUpdate(record) {
   if (!record) return

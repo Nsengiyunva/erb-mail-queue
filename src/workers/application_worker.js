@@ -3,7 +3,7 @@ import { Worker } from 'bullmq';
 import connection from '../redis/connection.js';
 import * as db from '../models/index.js';
 import sponsorNotificationQueue from '../queues/sponsor_notification_queue.js';
-import { autoAdvanceIfPaidOnline } from '../controllers/receipt-controller.js';
+import { autoAdvanceIfPaidOnline, advanceIfPaymentAlreadyVerified } from '../controllers/receipt-controller.js';
 
 const Application = db.sequelize.models.Application;
 
@@ -119,6 +119,12 @@ const worker = new Worker(
       // uploads and unconfirmed/failed payments.
       await autoAdvanceIfPaidOnline(application.id).catch(err =>
         console.error(`[ApplicationWorker] auto payment verification failed for ${application.id}:`, err.message)
+      );
+
+      // Resubmission of an application sent back by the Board AFTER its
+      // payment was verified? Skip Payment review → straight to Board review.
+      await advanceIfPaymentAlreadyVerified(application.id).catch(err =>
+        console.error(`[ApplicationWorker] previously-verified advance failed for ${application.id}:`, err.message)
       );
 
       // ── Notify nominated sponsors ─────────────────────────────────

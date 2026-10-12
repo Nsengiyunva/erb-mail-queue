@@ -39,6 +39,9 @@ export default (sequelize, DataTypes) => {
       training:                DataTypes.TEXT,
       positions:               DataTypes.TEXT,
       sponsors:                DataTypes.TEXT,
+      // ERA1 only — mandatory project title of the Technical Report
+      // (Section C). NULL for ERA2 / ERA3, which have no technical report.
+      technical_report_title:  DataTypes.STRING(255),
       technical_path:          DataTypes.STRING,
       career_path:             DataTypes.STRING,
       uipe_membership_letter_path:      DataTypes.STRING,
