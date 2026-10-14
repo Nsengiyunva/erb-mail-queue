@@ -381,7 +381,7 @@ router.get('/licence-status', async (req, res) => {
   const regNo = String(req.query.reg_no || '').trim()
   if (!regNo) return res.status(400).json({ message: 'reg_no is required' })
   try {
-    const status = await getLicenceStatus(regNo, req.headers.authorization)
+    const status = await getLicenceStatus(regNo, req.headers.authorization, { email: req.query.email })
     return res.json(status)
   } catch (err) {
     console.error('[GET /licence-status]', err.message)

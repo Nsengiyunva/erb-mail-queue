@@ -31,35 +31,97 @@ export function parseRenewalYear(value) {
   return allowedRenewalYears().includes(y) ? y : NaN
 }
 
-const normReg = (v) => String(v ?? '').trim().replace(/\/\d{4}$/, '').toUpperCase()
+// Strip a licence-year suffix ("1540/2026" → "1540") — only when a digit
+// precedes the slash, so "TR/0289" isn't mistaken for "TR" + year 0289.
+const normReg = (v) => String(v ?? '').trim().replace(/(\d)\s*\/\s*(19|20)\d{2}$/, '$1').toUpperCase()
 
-export async function findPaidRecords(regNo, years, authHeader) {
-  const target = normReg(regNo)
+// Registration numbers aren't stored consistently in the licence
+// register: "TR289", "TR 289", "TR/289", "TR-289", or just "289" with
+// base_field = TEMPORARY. Compare on a compact form (letters + digits,
+// leading zeros dropped) and treat a bare number on a TEMPORARY row as
+// the same engineer as "TR<number>".
+const compactReg = (v) => normReg(v).replace(/[^A-Z0-9]/g, '').replace(/^([A-Z]*)0+(\d)/, '$1$2')
+const regDigits  = (v) => (compactReg(v).match(/\d+/) || [''])[0]
+const regPrefix  = (v) => (compactReg(v).match(/^[A-Z]+/) || [''])[0]
+const isTempRow  = (r) => /TEMP/i.test(String(r?.base_field || r?.type || ''))
+
+function sameEngineer(r, target, email) {
+  const rowReg = compactReg(r.reg_no || String(r.license_no || '').split('/')[0])
+  // A bare "289" on a TEMPORARY row is TR289's — never permanent 289's.
+  if (rowReg && rowReg === target) return !(isTempRow(r) && !regPrefix(target) && !regPrefix(rowReg))
+  // "289" on a TEMPORARY row  ⇔  "TR289"
+  if (rowReg && regDigits(rowReg) === regDigits(target) && regDigits(target)) {
+    const rp = regPrefix(rowReg), tp = regPrefix(target)
+    if (!rp && tp === 'TR' && isTempRow(r)) return true
+    if (rp === 'TR' && !tp && isTempRow(r)) return false // different register
+  }
+  // Last resort: same email address (only when the reg no is blank on the row)
+  if (email && !rowReg) {
+    const rowEmail = String(r.email_address || r.email || '').trim().toLowerCase()
+    if (rowEmail && rowEmail === email) return true
+  }
+  return false
+}
+
+async function fetchPaidPage(search, page, authHeader) {
+  const url = `${DATA_API_BASE}/paid-records?${new URLSearchParams({ search, page: String(page) })}`
+  const res = await fetch(url, {
+    headers: authHeader ? { Authorization: authHeader } : {},
+    signal: AbortSignal.timeout(20000),
+  })
+  if (!res.ok) throw new Error(`paid-records lookup failed (${res.status})`)
+  return res.json()
+}
+
+export async function findPaidRecords(regNo, years, authHeader, { email } = {}) {
+  const target = compactReg(regNo)
   const found = {}
   if (!target) return found
+  const mail = String(email || '').trim().toLowerCase() || null
 
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const url = `${DATA_API_BASE}/paid-records?${new URLSearchParams({ search: target, page: String(page) })}`
-    const res = await fetch(url, {
-      headers: authHeader ? { Authorization: authHeader } : {},
-      signal: AbortSignal.timeout(20000),
-    })
-    if (!res.ok) throw new Error(`paid-records lookup failed (${res.status})`)
-    const body = await res.json()
+  // paid-records' search is a LIKE over name/email/reg_no/licence no, so
+  // "TR289" misses a row stored as "TR 289" or "289". Try the variants in
+  // turn (stopping as soon as every year is found).
+  const digits = regDigits(target)
+  const prefix = regPrefix(target)
+  const variants = [...new Set([
+    normReg(regNo),
+    target,
+    prefix && digits ? `${prefix} ${digits}` : null,
+    prefix && digits ? `${prefix}/${digits}` : null,
+    digits || null,
+    mail,
+  ].filter(Boolean))]
 
-    for (const r of body?.data ?? []) {
-      if (normReg(r.reg_no) !== target) continue
-      if (String(r.receipt_type || '').toUpperCase() === 'DELETED') continue
-      // year_paid is the source of truth; license_no "1540/2026" as backup
-      const y = Number(r.year_paid) || Number(String(r.license_no || '').split('/')[1]) || null
-      if (y && years.includes(y) && !found[y]) found[y] = r
+  for (const search of variants) {
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const body = await fetchPaidPage(search, page, authHeader)
+      for (const r of body?.data ?? []) {
+        if (String(r.receipt_type || '').toUpperCase() === 'DELETED') continue
+        if (!sameEngineer(r, target, mail)) continue
+        // year_paid is the source of truth; license_no "1540/2026" as backup
+        const y = Number(r.year_paid) || Number(String(r.license_no || '').split('/')[1]) || null
+        if (y && years.includes(y) && !found[y]) found[y] = r
+      }
+      if (years.every(y => found[y])) return found
+      const totalPages = body?.pagination?.totalPages ?? 1
+      if (page >= totalPages) break
     }
-
-    if (years.every(y => found[y])) break
-    const totalPages = body?.pagination?.totalPages ?? 1
-    if (page >= totalPages) break
   }
   return found
+}
+
+// Registration type (fee category) for renewals, from the licence register
+// row (base_field) or the reg-no prefix — NOT the discipline ("Civil"),
+// which says nothing about permanent vs temporary.
+export function feeCategoryFrom({ regNo, record } = {}) {
+  const bf = String(record?.base_field || record?.type || '').toUpperCase()
+  if (bf.includes('TEMP'))     return 'TEMPORARY'
+  if (bf.includes('TECHNICI')) return 'TECHNICIAN'
+  if (bf.includes('TECHNOLO')) return 'TECHNOLOGIST'
+  if (regPrefix(regNo) === 'TR') return 'TEMPORARY'
+  if (bf.includes('PERM') || bf.includes('CORP')) return 'CORPORATE'
+  return null
 }
 
 // Year a renewal transaction applies to.
@@ -68,11 +130,12 @@ const txYear = (tx) => tx.renewal_year || new Date(tx.createdAt || tx.created_at
 export async function findRenewalTransactions(regNo, years) {
   const target = normReg(regNo)
   if (!target) return {}
+  const ids = [...new Set([target, compactReg(regNo)].filter(Boolean))]
   const rows = await PaymentTransaction.findAll({
     where: {
       purpose: 'RENEWAL',
       status: { [Op.notIn]: ['DELETED', 'FAILED'] },
-      [Op.or]: [{ registration_number: target }, { application_id: target }],
+      [Op.or]: [{ registration_number: { [Op.in]: ids } }, { application_id: { [Op.in]: ids } }],
     },
     order: [['createdAt', 'DESC']],
     limit: 50,
@@ -92,12 +155,12 @@ export async function findRenewalTransactions(regNo, years) {
 }
 
 // state: 'licensed' | 'paid' | 'pending_review' | 'rejected' | 'none'
-export async function getLicenceStatus(regNo, authHeader) {
+export async function getLicenceStatus(regNo, authHeader, { email } = {}) {
   const years = allowedRenewalYears()
   let paid = {}
   let paidRecordsError = null
   try {
-    paid = await findPaidRecords(regNo, years, authHeader)
+    paid = await findPaidRecords(regNo, years, authHeader, { email })
   } catch (e) {
     paidRecordsError = e.message
   }
@@ -113,6 +176,7 @@ export async function getLicenceStatus(regNo, authHeader) {
         licence_no: rec.license_no || `${normReg(regNo)}/${y}`,
         license_status: rec.license_status || null,
         amount_paid: rec.amount_paid ?? null,
+        base_field: rec.base_field || null,
       }
     } else if (tx) {
       const s = tx.renewal_status || 'PENDING'
@@ -128,18 +192,23 @@ export async function getLicenceStatus(regNo, authHeader) {
     }
   }
 
+  const anyRecord = paid[years[0]] || paid[years[1]] || null
   return {
     reg_no: normReg(regNo),
     current_year: years[0],
     next_year: years[1],
     years: result,
+    // PERMANENT/CORPORATE | TEMPORARY | TECHNOLOGIST | TECHNICIAN, or null
+    // if neither the register nor the reg no says — the frontend then
+    // falls back to the profile.
+    fee_category: feeCategoryFrom({ regNo, record: anyRecord }),
     paid_records_error: paidRecordsError,
   }
 }
 
 // True when a new renewal payment for `year` should be refused.
-export async function renewalAlreadyCovered(regNo, year, authHeader) {
-  const status = await getLicenceStatus(regNo, authHeader)
+export async function renewalAlreadyCovered(regNo, year, authHeader, opts = {}) {
+  const status = await getLicenceStatus(regNo, authHeader, opts)
   const s = status.years[year]?.state
   if (s === 'licensed') return `A licence for ${year} is already on record for ${status.reg_no}.`
   if (s === 'paid') return `Your ${year} renewal has already been paid and approved.`
