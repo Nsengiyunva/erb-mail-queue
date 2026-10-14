@@ -405,6 +405,11 @@ import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, a
 import { resolveQuotedFee, erbFeeFor } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
+import {
+  renderApprovalLetter, saveApprovalLetter, resolveLetterOptions, validateLetterOptions,
+  letterCategoryFor, LETTER_TEMPLATES, defaultSalutation, defaultAddressLines, defaultReferenceNo,
+  todayISO, approvalLetterFilename,
+} from "../utils/approval-letter.js";
 
 const router = express.Router();
 const Application = ApplicationModel(sequelize, DataTypes);
@@ -1746,6 +1751,8 @@ router.get("/:id", async (req, res) => {
       // the payment_status fallback in GET /registry. Surfacing it here too
       // means the approver can actually open/verify it from the detail modal.
       { key: "payment_receipt_path",                 label: "Payment Receipt" },
+      // Board approval letter — generated/attached at /board_approve.
+      { key: "approval_letter_path",                 label: "Board Approval Letter" },
     ];
 
     // Technical Report applies to ERA1 only — ERA2 / ERA3 applicants submit
@@ -2058,7 +2065,7 @@ router.post("/accounts_defer_bulk", async (req, res) => {
 // above — used by both the single routes (POST /board_approve, /defer)
 // and their bulk counterparts (POST /board_approve_bulk, /defer_bulk) for
 // the Board Review checkbox-select UI.
-async function approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number }) {
+async function approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number, letter }) {
   if (!applicationID || !comment || !comment.trim()) {
     const err = new Error("applicationID and a comment are both required");
     err.status = 400;
@@ -2083,6 +2090,11 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
 
   const trimmedLicenseNumber = license_number ? String(license_number).trim() : null;
 
+  // ── Approval letter — prepared BEFORE the status flips, so a letter
+  // problem (missing meeting number, bad upload) fails the approval cleanly
+  // instead of leaving an approved application with no letter.
+  const approvalLetter = await prepareApprovalLetter(raw, letter, approved_by);
+
   await application.update({
     status:             "BOARD_APPROVED",
     sponsors:            effective.sponsors, // carries the sponsor-signed correction, if any, atomically
@@ -2090,6 +2102,8 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
     board_approved_by:   approved_by || "Admin",
     board_approved_at:   new Date(),
     ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
+    approval_letter_path: approvalLetter.filename,
+    approval_letter_meta: JSON.stringify(approvalLetter.meta),
   });
 
   logApplicationEvent(application.id, {
@@ -2132,8 +2146,14 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
         licenseNumber:     trimmedLicenseNumber,
         applicationId:     application.id,
         registrationFee:   resolveQuotedFee("REGISTRATION", raw.category || raw.profession),
+        // Approval letter rides on this one email — the worker attaches it
+        // and stamps approval_letter_sent_at, so it is only ever sent once.
+        approvalLetter:    { filename: approvalLetter.filename, displayName: approvalLetter.displayName },
       },
       {
+        // Deterministic id: a duplicate enqueue for the same application
+        // is ignored by BullMQ instead of emailing the letter twice.
+        jobId: `approved-${application.id}`,
         attempts: 3,
         backoff: { type: "exponential", delay: 5000 },
         removeOnComplete: true,
@@ -2144,8 +2164,181 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
     console.error("Failed to queue application-approved email (approval was still recorded):", emailQueueError);
   }
 
-  return { application_status: application.status, license_number: trimmedLicenseNumber };
+  return {
+    application_status: application.status,
+    license_number:     trimmedLicenseNumber,
+    approval_letter_path: approvalLetter.filename,
+  };
 }
+
+// ── Approval letter helpers ────────────────────────────────────────
+// `letter` (from the request body) is either
+//   { uploaded_path }                            — officer attached their own PDF, or
+//   { meeting_number, meeting_date, letter_date,
+//     reference_no, salutation, address_lines }  — generate from the category template.
+const APPROVAL_LETTER_PREFIX_RE = /^[\w.\-]+\.pdf$/i;
+
+async function prepareApprovalLetter(raw, letter, approvedBy) {
+  const category = letterCategoryFor(raw);
+  const base = {
+    category,
+    category_label: LETTER_TEMPLATES[category]?.label,
+    generated_by:   approvedBy || "Admin",
+    generated_at:   new Date().toISOString(),
+  };
+
+  if (!letter || typeof letter !== "object") {
+    const err = new Error("An approval letter is required — generate or attach one before approving.");
+    err.status = 400;
+    throw err;
+  }
+
+  if (letter.uploaded_path) {
+    const filename = path.basename(String(letter.uploaded_path));
+    if (!APPROVAL_LETTER_PREFIX_RE.test(filename) || !fs.existsSync(path.join(UPLOADS_DIR, filename))) {
+      const err = new Error("The attached approval letter could not be found — please attach it again.");
+      err.status = 400;
+      throw err;
+    }
+    return {
+      filename,
+      displayName: approvalLetterFilename(raw, category),
+      meta: { ...base, source: "UPLOADED", meeting_number: letter.meeting_number || null, meeting_date: letter.meeting_date || null },
+    };
+  }
+
+  const options = resolveLetterOptions(raw, letter);
+  const problems = validateLetterOptions(options);
+  if (problems.length) {
+    const err = new Error(problems.join(" "));
+    err.status = 400;
+    throw err;
+  }
+  const saved = await saveApprovalLetter(raw, options, UPLOADS_DIR);
+  return {
+    filename:    saved.filename,
+    displayName: saved.displayName,
+    meta: {
+      ...base,
+      source:         "GENERATED",
+      meeting_number: saved.options.meeting_number,
+      meeting_date:   saved.options.meeting_date,
+      letter_date:    saved.options.letter_date,
+      reference_no:   saved.options.reference_no,
+      salutation:     saved.options.salutation,
+      address_lines:  saved.options.address_lines,
+    },
+  };
+}
+
+async function findApplicationOr404(req, res) {
+  if (!/^\d+$/.test(req.params.id)) {
+    res.status(400).json({ message: "A valid numeric application ID is required" });
+    return null;
+  }
+  const application = await Application.findOne({ where: { id: req.params.id } });
+  if (!application) {
+    res.status(404).json({ message: "Application not found" });
+    return null;
+  }
+  return application;
+}
+
+// ── GET /:id/approval_letter/defaults ─────────────────────────────
+// Prefills the letter form: category/template, salutation, address,
+// reference no., today's date, and the board meeting number/date used on
+// the most recent approval (approvals are batched per board meeting, so
+// that's almost always the right starting point).
+router.get("/:id/approval_letter/defaults", async (req, res) => {
+  try {
+    const application = await findApplicationOr404(req, res);
+    if (!application) return;
+    const raw = application.toJSON();
+    const category = letterCategoryFor(raw);
+
+    let lastMeeting = {};
+    try {
+      const last = await Application.findOne({
+        where: { approval_letter_meta: { [Op.ne]: null } },
+        order: [["board_approved_at", "DESC"]],
+        attributes: ["approval_letter_meta"],
+      });
+      const meta = last?.approval_letter_meta ? JSON.parse(last.approval_letter_meta) : null;
+      if (meta) lastMeeting = { meeting_number: meta.meeting_number || "", meeting_date: meta.meeting_date || "" };
+    } catch { /* first ever letter, or bad JSON — just no prefill */ }
+
+    return res.status(200).json({
+      category,
+      category_label: LETTER_TEMPLATES[category]?.label,
+      heading:        LETTER_TEMPLATES[category]?.heading,
+      recipient_name: formatApplicantName(raw),
+      salutation:     defaultSalutation(raw),
+      address_lines:  defaultAddressLines(raw),
+      reference_no:   defaultReferenceNo(raw),
+      letter_date:    todayISO(),
+      meeting_number: lastMeeting.meeting_number || "",
+      meeting_date:   lastMeeting.meeting_date || "",
+      email:          raw.email_address,
+      already_sent_at: raw.approval_letter_sent_at || null,
+    });
+  } catch (error) {
+    console.error("Failed to load approval letter defaults:", error);
+    return res.status(500).json({ message: "Failed to load approval letter defaults" });
+  }
+});
+
+// ── POST /:id/approval_letter/preview ─────────────────────────────
+// Renders the letter with the officer's current inputs and streams the
+// PDF back — nothing is saved. Missing meeting details render as blanks
+// so the officer can see the layout while still filling the form in.
+router.post("/:id/approval_letter/preview", async (req, res) => {
+  try {
+    const application = await findApplicationOr404(req, res);
+    if (!application) return;
+    const raw = application.toJSON();
+    const { buffer, filename } = await renderApprovalLetter(raw, req.body || {});
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+    return res.status(200).send(buffer);
+  } catch (error) {
+    console.error("Failed to render approval letter preview:", error);
+    return res.status(500).json({ message: "Failed to generate the approval letter preview" });
+  }
+});
+
+// ── POST /:id/approval_letter/upload ──────────────────────────────
+// Lets the officer attach their own (e.g. wet-signed, scanned) letter in
+// place of the generated one. PDF only. Returns the stored filename,
+// which the frontend sends back as letter.uploaded_path on approval.
+const uploadLetter = (req, res, next) => {
+  upload.single("document")(req, res, (err) => {
+    if (err) {
+      if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "Approval letter must be under 50 MB." });
+      return res.status(400).json({ message: err.message || "Upload failed" });
+    }
+    next();
+  });
+};
+router.post("/:id/approval_letter/upload", uploadLetter, async (req, res) => {
+  try {
+    const application = await findApplicationOr404(req, res);
+    if (!application) { if (req.file) fs.unlink(req.file.path, () => {}); return; }
+    if (!req.file) return res.status(400).json({ message: "No file was uploaded" });
+    if (req.file.mimetype !== "application/pdf") {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ message: "The approval letter must be a PDF." });
+    }
+    // Rename to a predictable, URL-safe name.
+    const raw = application.toJSON();
+    const finalName = `${Date.now()}-${approvalLetterFilename(raw, letterCategoryFor(raw)).replace(/\.pdf$/i, "")}-attached.pdf`;
+    await fs.promises.rename(req.file.path, path.join(UPLOADS_DIR, finalName));
+    return res.status(200).json({ message: "Approval letter attached", filePath: finalName });
+  } catch (error) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    console.error("Approval letter upload failed:", error);
+    return res.status(500).json({ message: "Failed to attach approval letter" });
+  }
+});
 
 async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_by }) {
   if (!applicationID || !comment || !comment.trim()) {
@@ -2225,9 +2418,9 @@ async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_
 // request body for the audit trail — worth tightening with real
 // server-side auth before this is relied on for compliance purposes.
 router.post("/board_approve", async (req, res) => {
-  const { applicationID, comment, approved_by, license_number } = req.body || {};
+  const { applicationID, comment, approved_by, license_number, letter } = req.body || {};
   try {
-    const result = await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number });
+    const result = await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number, letter });
     return res.status(200).json({
       message: "Application approved on behalf of the Board",
       ...result,
@@ -2251,13 +2444,25 @@ router.post("/board_approve", async (req, res) => {
 // flagged in case that turns out to matter in practice).
 router.post("/board_approve_bulk", async (req, res) => {
   try {
-    const { applicationIDs, comment, approved_by } = req.body || {};
+    const { applicationIDs, comment, approved_by, letter } = req.body || {};
 
     if (!Array.isArray(applicationIDs) || applicationIDs.length === 0) {
       return res.status(400).json({ message: "Select at least one application" });
     }
     if (!comment || !comment.trim()) {
       return res.status(400).json({ message: "Please add a comment before approving" });
+    }
+    // Bulk letters share the board meeting details; everything personal
+    // (salutation, address, reference, category template) is derived per
+    // applicant, so each engineer still gets their own letter.
+    const sharedLetter = {
+      meeting_number: letter?.meeting_number,
+      meeting_date:   letter?.meeting_date,
+      letter_date:    letter?.letter_date,
+    };
+    const sharedProblems = validateLetterOptions(resolveLetterOptions({}, sharedLetter));
+    if (sharedProblems.length) {
+      return res.status(400).json({ message: sharedProblems.join(" ") });
     }
     if (applicationIDs.length > 200) {
       return res.status(400).json({ message: "Please select 200 applications or fewer at a time" });
@@ -2266,7 +2471,7 @@ router.post("/board_approve_bulk", async (req, res) => {
     const results = [];
     for (const applicationID of applicationIDs) {
       try {
-        await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by });
+        await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, letter: sharedLetter });
         results.push({ applicationID, ok: true });
       } catch (err) {
         results.push({ applicationID, ok: false, message: err.message || "Failed to approve" });

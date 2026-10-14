@@ -2,8 +2,14 @@ import { Worker } from 'bullmq';
 import connection from '../redis/connection.js';
 import { sendStyledMail } from '../utils/mailer.js';
 import * as db from '../models/index.js';
+import fs from 'fs';
+import path from 'path';
 
 const EmailLog = db.sequelize.models.EmailLog;
+const Application = db.Application;
+
+// Same directory application_routes.js stores uploads (and approval letters) in.
+const UPLOADS_DIR = path.resolve('/home/user1/uploads');
 
 const PORTAL_URL = 'https://registration.erb.go.ug';
 
@@ -26,7 +32,7 @@ const escapeHtml = (v) => String(v ?? '')
 // in one worker (rather than one queue per event) mirrors how close
 // they are: same recipient, same idempotent EmailLog bookkeeping, only
 // the copy changes.
-function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays }) {
+function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays, approvalLetter }) {
   const name         = applicantName || 'Applicant';
   const licenceLabel = applicationType || 'licence';
   const trackingLine = trackingNumber
@@ -135,6 +141,7 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
       <p>Congratulations — your ${licenceLabel} application has been approved by the Engineers Registration Board.</p>
       ${trackingLine}
       ${licenseNumber ? `<p style="font-size:15px;margin:14px 0;"><strong>Licence number: ${licenseNumber}</strong></p>` : ''}
+      ${approvalLetter ? `<p style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px 14px;margin:16px 0;color:#1e3a8a;">📎 Your official <strong>approval letter</strong> from the Board is attached to this email. Please keep it for your records — it sets out the dues payable and the deadline for payment.</p>` : ''}
       <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:18px 0;">
         <p style="margin:0 0 10px;font-weight:bold;color:#065f46;">Next step: pay your annual registration fee</p>
         ${feeLine}
@@ -186,6 +193,28 @@ const worker = new Worker(
 
       await job.updateProgress(40);
 
+      // ── Approval letter: attach it, and never send it twice ─────────
+      let attachments = [];
+      let letterApp = null;
+      if (type === 'APPROVED' && job.data.approvalLetter?.filename && job.data.applicationId) {
+        letterApp = await Application.findOne({ where: { id: job.data.applicationId } });
+        if (letterApp?.approval_letter_sent_at) {
+          console.log(`[ApplicationStatusEmailWorker] Approval letter for application ${job.data.applicationId} already sent at ${letterApp.approval_letter_sent_at.toISOString?.() || letterApp.approval_letter_sent_at} → skipping`);
+          await emailLog.update({ status: 'SENT', sent_at: emailLog.sent_at || new Date() });
+          return { success: true, skipped: true };
+        }
+        const letterFile = path.join(UPLOADS_DIR, path.basename(job.data.approvalLetter.filename));
+        if (!fs.existsSync(letterFile)) {
+          // Throw → BullMQ retries; better than silently emailing without the letter.
+          throw new Error(`Approval letter file missing: ${letterFile}`);
+        }
+        attachments = [{
+          filename:    job.data.approvalLetter.displayName || path.basename(letterFile),
+          path:        letterFile,
+          contentType: 'application/pdf',
+        }];
+      }
+
       const { subject, body } = buildEmail(job.data);
       const htmlContent = `
         <div style="font-family: Arial, Helvetica, sans-serif; background-color: #f8f2f2; padding: 30px;">
@@ -201,9 +230,15 @@ const worker = new Worker(
 
       await job.updateProgress(70);
 
-      await sendStyledMail(to, subject, htmlContent);
+      await sendStyledMail(to, subject, htmlContent, attachments);
 
       await emailLog.update({ status: 'SENT', sent_at: new Date() });
+
+      if (letterApp) {
+        await letterApp.update({ approval_letter_sent_at: new Date() }).catch(err =>
+          console.error(`[ApplicationStatusEmailWorker] Sent letter but could not stamp approval_letter_sent_at for ${job.data.applicationId}:`, err.message)
+        );
+      }
 
       await job.updateProgress(100);
 

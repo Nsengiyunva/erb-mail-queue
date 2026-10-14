@@ -90,6 +90,14 @@ export default (sequelize, DataTypes) => {
       // approval (see /board_approve) — optional, since not every
       // applicant type is issued a licence number at this step.
       license_number:                   DataTypes.STRING,
+      // Board approval letter (see utils/approval-letter.js). Generated —
+      // or uploaded — by the Registration officer at /board_approve and
+      // emailed to the applicant exactly once, attached to the approval
+      // email. approval_letter_meta is JSON: category, meeting number/date,
+      // letter date, reference no., source (GENERATED | UPLOADED), by.
+      approval_letter_path:             DataTypes.STRING,
+      approval_letter_meta:             DataTypes.TEXT,
+      approval_letter_sent_at:          DataTypes.DATE,
       // Records the registration fee payment (paid after board/registration
       // approval, separate from the earlier application-fee payment). See
       // /registration_fee/initiate.
