@@ -33,6 +33,81 @@ const REGISTRAR_NAME  = process.env.ERB_REGISTRAR_NAME  || "Eng. NAMUGERA RONALD
 const REGISTRAR_TITLE = process.env.ERB_REGISTRAR_TITLE || "REGISTRAR, ENGINEERS REGISTRATION BOARD";
 
 const ERB_RED = "#C8102E";
+
+// ── Typeface: Goudy Old Style, as in the Board's Word templates ───────
+// Goudy Old Style (GOUDOS*.TTF, ships with MS Office) is a licensed
+// Monotype font, so it is not bundled. If the ERB server has licensed
+// copies, drop them into src/assets/fonts/ (or point ERB_LETTER_FONT_DIR
+// at them) and they are used automatically — regular, bold and italic.
+// Otherwise we fall back to Sorts Mill Goudy (bundled, SIL OFL — a
+// faithful open revival of Goudy Old Style), which has no bold cut, so
+// bold is drawn as a thickened outline ("faux bold").
+const FONT_DIRS = [process.env.ERB_LETTER_FONT_DIR, path.resolve(__dirname, "../assets/fonts")].filter(Boolean);
+const findFont = (...names) => {
+  for (const dir of FONT_DIRS) for (const n of names) {
+    for (const cand of [n, n.toLowerCase(), n.toUpperCase()]) {
+      const p = path.join(dir, cand);
+      if (fs.existsSync(p)) return p;
+    }
+  }
+  return null;
+};
+const LICENSED = {
+  regular: findFont("GOUDOS.TTF", "GoudyOldStyle-Regular.ttf"),
+  bold:    findFont("GOUDOSB.TTF", "GoudyOldStyle-Bold.ttf"),
+  italic:  findFont("GOUDOSI.TTF", "GoudyOldStyle-Italic.ttf"),
+};
+const OPEN = {
+  regular: findFont("SortsMillGoudy-Regular.ttf"),
+  italic:  findFont("SortsMillGoudy-Italic.ttf"),
+};
+const FONT_FILES = LICENSED.regular
+  ? { regular: LICENSED.regular, bold: LICENSED.bold, italic: LICENSED.italic || LICENSED.regular, boldItalic: LICENSED.bold || null }
+  : OPEN.regular
+    ? { regular: OPEN.regular, bold: null, italic: OPEN.italic || OPEN.regular, boldItalic: null }
+    : null; // no Goudy at all → built-in Times (closest standard serif)
+console.log(`[approval-letter] Letter font: ${LICENSED.regular ? "Goudy Old Style (licensed)" : OPEN.regular ? "Sorts Mill Goudy (open Goudy revival)" : "Times (fallback)"}`);
+
+const BODY_SIZE = 12;
+
+function registerFonts(doc) {
+  if (!FONT_FILES) return;
+  doc.registerFont("Goudy",        FONT_FILES.regular);
+  doc.registerFont("Goudy-Italic", FONT_FILES.italic);
+  if (FONT_FILES.bold)       doc.registerFont("Goudy-Bold",       FONT_FILES.bold);
+  if (FONT_FILES.boldItalic) doc.registerFont("Goudy-BoldItalic", FONT_FILES.boldItalic);
+}
+
+// Sets font + colour for a style. Faux bold (no bold cut available) is
+// applied by the doc.text wrapper installed in installFauxBold().
+function useFont(doc, style = "regular", color = "#000") {
+  const bold = style === "bold" || style === "boldItalic";
+  const italic = style === "italic" || style === "boldItalic";
+  let name, faux = false;
+  if (!FONT_FILES) {
+    name = bold && italic ? "Times-BoldItalic" : bold ? "Times-Bold" : italic ? "Times-Italic" : "Times-Roman";
+  } else if (bold && italic) {
+    if (FONT_FILES.boldItalic) name = "Goudy-BoldItalic"; else { name = "Goudy-Italic"; faux = true; }
+  } else if (bold) {
+    if (FONT_FILES.bold) name = "Goudy-Bold"; else { name = "Goudy"; faux = true; }
+  } else {
+    name = italic ? "Goudy-Italic" : "Goudy";
+  }
+  doc._fauxBold = faux;
+  doc.font(name).fillColor(color).strokeColor(color);
+  return doc;
+}
+
+function installFauxBold(doc) {
+  const origText = doc.text.bind(doc);
+  doc.text = (...args) => {
+    const last = args[args.length - 1];
+    const opts = (last && typeof last === "object") ? args.pop() : {};
+    if (doc._fauxBold) { doc.lineWidth(0.45); args.push({ ...opts, fill: true, stroke: true }); }
+    else args.push({ ...opts, fill: true, stroke: false });
+    return origText(...args);
+  };
+}
 const PAYMENT_PORTAL_URL = process.env.ERB_PAYMENT_PORTAL_URL || "https://registration.erb.go.ug";
 
 // ── Per-category content ─────────────────────────────────────────────
@@ -266,16 +341,18 @@ export function approvalLetterFilename(application, category) {
 const PAGE = { left: 62, right: 62, top: 34 };
 
 // Writes a run of {text, bold} segments as one justified paragraph.
-function richParagraph(doc, segments, { size = 10.5, gap = 9, align = "justify" } = {}) {
+// pdfkit mis-justifies lines that mix fonts (huge word gaps), so mixed
+// paragraphs are left-aligned; single-run paragraphs stay justified.
+function richParagraph(doc, segments, { size = BODY_SIZE, gap = 9, align = segments.length > 1 ? "left" : "justify" } = {}) {
   segments.forEach((seg, i) => {
-    doc.font(seg.bold ? "Helvetica-Bold" : "Helvetica").fontSize(size).fillColor(seg.color || "#000");
+    useFont(doc, seg.bold ? "bold" : "regular", seg.color || "#000").fontSize(size);
     doc.text(seg.text, {
       continued: i < segments.length - 1, align, lineGap: 1.5,
       underline: !!seg.underline,
       ...(seg.link ? { link: seg.link } : { link: null }),
     });
   });
-  doc.fillColor("#000");
+  useFont(doc, "regular");
   doc.moveDown(gap / 12);
 }
 
@@ -294,9 +371,9 @@ function drawLetterhead(doc, referenceNo) {
   const rows = [["Telephone:", "+256 - 39- 3194942"], ["Email:", "info@erb.go.ug"], ["Website:", "www.erb.go.ug"]];
   rows.forEach(([label, value], i) => {
     const y = top + i * 15;
-    doc.font("Helvetica-Bold").fontSize(9).fillColor("#000").text(label, labelX, y, { lineBreak: false });
+    useFont(doc, "bold").fontSize(10).text(label, labelX, y, { lineBreak: false });
     const isLink = label === "Website:";
-    doc.font("Helvetica-Bold").fontSize(9).fillColor(isLink ? "#1d4ed8" : "#000")
+    useFont(doc, "bold", isLink ? "#1d4ed8" : "#000").fontSize(10)
        .text(value, valueX, y, { width: 120, lineBreak: false, underline: isLink, ...(isLink ? { link: "https://www.erb.go.ug" } : {}) });
   });
   doc.fillColor("#000");
@@ -305,19 +382,19 @@ function drawLetterhead(doc, referenceNo) {
   const logoSize = 74;
   const logoX = (pageW - logoSize) / 2;
   if (fs.existsSync(LOGO_PATH)) doc.image(LOGO_PATH, logoX, top - 6, { width: logoSize, height: logoSize });
-  doc.font("Times-BoldItalic").fontSize(8).fillColor(ERB_RED)
+  useFont(doc, "boldItalic", ERB_RED).fontSize(8.5)
      .text("For Engineering Excellence", logoX - 30, top + logoSize - 2, { width: logoSize + 60, align: "center" });
   doc.fillColor("#000");
 
   // Right: postal address
   const rx = right - 150;
   ["Engineers Registration Board,", "P.O. Box 29267,", "Kampala, UGANDA."].forEach((line, i) => {
-    doc.font("Helvetica-Bold").fontSize(9).text(line, rx, top + i * 15, { width: 150, lineBreak: false });
+    useFont(doc, "bold").fontSize(10).text(line, rx, top + i * 15, { width: 150, lineBreak: false });
   });
 
   // Reference
   const refY = top + 62;
-  doc.font("Helvetica-Bold").fontSize(9.5)
+  useFont(doc, "bold").fontSize(10.5)
      .text("In any correspondence on this subject", left + 8, refY, { width: 200 })
      .text(`please quote No: ${referenceNo}`, left + 8, doc.y, { width: 220 });
 
@@ -347,6 +424,9 @@ export function renderApprovalLetter(application, input = {}) {
           Subject: `Board approval letter (${template.label})`,
         },
       });
+      registerFonts(doc);
+      installFauxBold(doc);
+      useFont(doc, "regular").fontSize(BODY_SIZE);
       const chunks = [];
       doc.on("data", (c) => chunks.push(c));
       doc.on("end", () => resolve({ buffer: Buffer.concat(chunks), options, filename }));
@@ -359,7 +439,7 @@ export function renderApprovalLetter(application, input = {}) {
 
       // Date + addressee
       body(() => {
-        doc.font("Helvetica").fontSize(10.5).text(formatLetterDate(options.letter_date), { width });
+        useFont(doc, "regular").fontSize(BODY_SIZE).text(formatLetterDate(options.letter_date), { width });
         doc.moveDown(0.9);
         const nameLine = [options.salutation, options.recipient_name].filter(Boolean).join(" ");
         doc.text(nameLine, { width });
@@ -370,7 +450,8 @@ export function renderApprovalLetter(application, input = {}) {
         doc.moveDown(0.9);
         doc.text(`Dear ${[options.salutation, salutationName(application)].filter(Boolean).join(" ")},`, { width });
         doc.moveDown(0.9);
-        doc.font("Helvetica-Bold").text(template.heading, { width, underline: true });
+        useFont(doc, "bold").text(template.heading, { width, underline: true });
+        useFont(doc, "regular");
         doc.moveDown(0.8);
       });
 
@@ -406,10 +487,10 @@ export function renderApprovalLetter(application, input = {}) {
       body(() => {
         if (fs.existsSync(SIGNATURE_PATH)) doc.image(SIGNATURE_PATH, PAGE.left, doc.y + 2, { width: 78 });
         doc.y += 42;
-        doc.font("Helvetica-Bold").fontSize(10.5).text(REGISTRAR_NAME, PAGE.left, doc.y, { width });
-        doc.font("Helvetica-Bold").fontSize(9.5).text(REGISTRAR_TITLE, { width, underline: true });
+        useFont(doc, "bold").fontSize(BODY_SIZE).text(REGISTRAR_NAME, PAGE.left, doc.y, { width });
+        useFont(doc, "bold").fontSize(10.5).text(REGISTRAR_TITLE, { width, underline: true });
         doc.moveDown(0.5);
-        doc.font("Helvetica").fontSize(10.5).text("c.c. Chairman, Engineers Registration Board", { width });
+        useFont(doc, "regular").fontSize(BODY_SIZE).text("c.c. Chairman, Engineers Registration Board", { width });
       });
 
       doc.end();
