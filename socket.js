@@ -9,4 +9,6 @@ export const io = new Server(server, {
   cors: { origin: '*' },
 });
 
+
+//socket
 server.listen(4000);
