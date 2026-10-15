@@ -93,6 +93,12 @@ export default (sequelize, DataTypes) => {
       // Finalizing → Registered (see POST /finalize). The Registration
       // officer issues the licence number at this step, after the Board
       // approval (BOARD_APPROVED / "Finalizing").
+      // Registration fee verified by Accounts → licence number issued and
+      // the application moves to FINALIZING (see /registration_fee/verify).
+      registration_fee_verified_by:     DataTypes.STRING,
+      registration_fee_verified_at:     DataTypes.DATE,
+      registration_fee_comment:         DataTypes.TEXT,
+      license_issued_at:                DataTypes.DATE,
       registered_by:                    DataTypes.STRING,
       registered_at:                    DataTypes.DATE,
       registration_comment:             DataTypes.TEXT,

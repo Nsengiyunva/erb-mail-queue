@@ -10,7 +10,8 @@
 //   45%     Submitted, awaiting sponsor confirmation
 //   50%     Payment review (Accounts)
 //   70%     Board review
-//   90%     Finalizing (board approved, registration fee / licence pending)
+//   85%     Registration fee (board approved, letter sent; applicant pays, Accounts verifies)
+//   95%     Finalizing (fee verified, licence number issued; Registration confirms)
 //   100%    Registered
 //
 // Pure function — no DB access — so it can run on every row of a list.
@@ -29,7 +30,8 @@ const STAGE_PROGRESS = {
   AWAITING_SPONSOR_APPROVAL: 45,
   SPONSOR_APPROVED:          50,
   ACCOUNTS_APPROVED:         70,
-  BOARD_APPROVED:            90,
+  BOARD_APPROVED:            85,
+  FINALIZING:                95,
   REGISTERED:               100,
   COMPLETED:                100,
 }
@@ -40,7 +42,8 @@ const STAGE_LABEL = {
   AWAITING_SPONSOR_APPROVAL: 'Awaiting sponsors',
   SPONSOR_APPROVED:          'Payment review',
   ACCOUNTS_APPROVED:         'Board review',
-  BOARD_APPROVED:            'Finalizing',
+  BOARD_APPROVED:            'Registration fee',
+  FINALIZING:                'Finalizing',
   REGISTERED:                'Registered',
   COMPLETED:                 'Registered',
 }

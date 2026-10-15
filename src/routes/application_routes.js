@@ -405,6 +405,8 @@ import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, a
 import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
+import { allocateLicenceNumber, registrationTypeFor, peekLicenceNumbers } from "../utils/licence-numbers.js";
+import { addToEngineerRegister } from "../utils/engineer-register.js";
 import {
   renderApprovalLetter, saveApprovalLetter, resolveLetterOptions, validateLetterOptions,
   letterCategoryFor, LETTER_TEMPLATES, defaultSalutation, defaultAddressLines, defaultReferenceNo,
@@ -1181,6 +1183,7 @@ router.get("/sponsor_requests/:sponsor_id", async (req, res) => {
       "SPONSOR_APPROVED",
       "ACCOUNTS_APPROVED",
       "BOARD_APPROVED",
+      "FINALIZING",
       "REGISTERED",
       "COMPLETED",
     ];
@@ -1405,6 +1408,7 @@ router.get("/registry", async (req, res) => {
       ACCOUNTS_APPROVED: countsByStatus.ACCOUNTS_APPROVED || 0,
       DEFERRED:          deferredCount,
       BOARD_APPROVED:    countsByStatus.BOARD_APPROVED || 0,
+      FINALIZING:        countsByStatus.FINALIZING || 0,
       REGISTERED:        (countsByStatus.REGISTERED || 0) + (countsByStatus.COMPLETED || 0),
     };
 
@@ -1416,6 +1420,11 @@ router.get("/registry", async (req, res) => {
 
     // Keep only the most recent transaction per application (an applicant
     // may have retried payment more than once).
+    // Registration-fee payments (after Board approval) for the rows on
+    // this page — shown on the "Registration fee" tab so Accounts can see
+    // at a glance who has paid.
+    const regPaymentByApp = await findRegistrationPaymentsFor(rows.map(r => r.toJSON()));
+
     const latestPaymentByApp = {};
     for (const p of payments) {
       const existing = latestPaymentByApp[p.application_id];
@@ -1498,6 +1507,7 @@ router.get("/registry", async (req, res) => {
         submitted_at:      raw.updated_at || raw.created_at,
         license_number:    raw.license_number || null,
         registration_fee_status: raw.registration_fee_status || null,
+        registration_payment:    summariseRegistrationPayment(regPaymentByApp[raw.id]),
       };
     });
 
@@ -1810,6 +1820,12 @@ router.get("/:id", async (req, res) => {
         membership:  parseCol(raw.membership),
         sponsors,
         documents,
+        registration_payment: summariseRegistrationPayment((await findRegistrationPaymentsFor([raw]))[raw.id]),
+        registration_fee: {
+          category:       registrationCategoryFor(raw),
+          quoted_amount:  QUOTED_FEES.REGISTRATION[registrationCategoryFor(raw)] ?? null,
+          charged_amount: CHARGED_FEES.REGISTRATION[registrationCategoryFor(raw)] ?? null,
+        },
       },
     });
   } catch (error) {
@@ -2152,47 +2168,195 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
   };
 }
 
-// ── Finalizing → Registered ─────────────────────────────────────────
-// After Board approval (BOARD_APPROVED, the "Finalizing" tab) the
-// Registration officer issues the licence number. That registers the
-// engineer: status REGISTERED, old_users flagged registered + licence no.,
-// thread entry, and a "registration complete" email with the number.
-async function finalizeRegistration(applicationID, { license_number, comment, registered_by }) {
-  const licenceNo = String(license_number || "").trim();
-  if (!applicationID || !licenceNo) {
-    const err = new Error("A licence number is required to finalize registration.");
-    err.status = 400;
-    throw err;
+// ── Registration-fee payments ───────────────────────────────────────
+// Registration fees are recorded as PaymentTransaction rows with purpose
+// REGISTRATION. Online (Mobile Money) rows carry the applicant's user id
+// (applicant_id, and usually application_id = licence no. / user id);
+// receipt rows from POST /receipt/registration-payment carry
+// application_id = erb_applications.id. Match on any of those.
+async function findRegistrationPaymentsFor(rawRows) {
+  const out = {};
+  if (!rawRows.length) return out;
+  const appIds       = rawRows.map(r => String(r.id));
+  const applicantIds = rawRows.map(r => r.applicant_id).filter(v => v != null);
+  try {
+    const txs = await PaymentTransaction.findAll({
+      where: {
+        purpose: "REGISTRATION",
+        status:  { [Op.notIn]: ["DELETED"] },
+        [Op.or]: [
+          { application_id: { [Op.in]: [...appIds, ...applicantIds.map(String)] } },
+          ...(applicantIds.length ? [{ applicant_id: { [Op.in]: applicantIds } }] : []),
+        ],
+      },
+      order: [["updatedAt", "DESC"]],
+    });
+    for (const r of rawRows) {
+      const mine = txs.find(t =>
+        String(t.application_id) === String(r.id) ||
+        (r.applicant_id != null && (String(t.applicant_id) === String(r.applicant_id) || String(t.application_id) === String(r.applicant_id)))
+      );
+      if (mine) out[r.id] = mine;
+    }
+  } catch (err) {
+    console.error("[registration-fee] payment lookup failed:", err.message);
   }
+  return out;
+}
 
+function summariseRegistrationPayment(tx) {
+  if (!tx) return null;
+  const t = tx.toJSON ? tx.toJSON() : tx;
+  const isReceipt = String(t.payment_method || t.provider || "").toUpperCase() === "RECEIPT";
+  return {
+    id:              t.id,
+    method:          isReceipt ? "RECEIPT" : "ONLINE",
+    provider:        t.provider || null,
+    status:          normaliseStatus(t.status),
+    amount_charged:  t.amount ?? null,
+    amount:          t.quoted_amount ?? erbFeeFor(t),
+    transaction_ref: t.transaction_ref || null,
+    phone:           t.phone || null,
+    receipt_url:     t.receipt_path ? `https://helper.erb.go.ug/api/erb/receipt/uploads/${encodeURIComponent(t.receipt_path)}` : null,
+    date:            t.updatedAt || t.createdAt || null,
+  };
+}
+
+// ── Registration fee → Accounts verification → Finalizing ──────────
+// After Board approval (BOARD_APPROVED, "Registration fee" tab) the
+// applicant pays. Accounts verifies the payment; that issues the next
+// licence number for the applicant's category (utils/licence-numbers.js)
+// and moves the application to FINALIZING.
+async function verifyRegistrationFee(applicationID, { verified_by, comment }) {
   const application = await Application.findOne({ where: { id: applicationID } });
-  if (!application) {
-    const err = new Error("Application not found");
-    err.status = 404;
-    throw err;
-  }
+  if (!application) { const e = new Error("Application not found"); e.status = 404; throw e; }
   const raw = application.toJSON();
   if (String(raw.status || "").toUpperCase() !== "BOARD_APPROVED") {
-    const err = new Error(`Only applications in Finalizing can be registered (current status: ${raw.status}).`);
-    err.status = 400;
-    throw err;
+    const e = new Error(`Only board-approved applications awaiting their registration fee can be verified (current status: ${raw.status}).`);
+    e.status = 400; throw e;
   }
 
-  // Licence numbers must be unique across applications.
-  const clash = await Application.findOne({
-    where: { license_number: licenceNo, id: { [Op.ne]: application.id } },
-    attributes: ["id"],
+  const category = registrationCategoryFor(raw);
+  const now = new Date();
+  let issued;
+  await sequelize.transaction(async (t) => {
+    // Re-read under lock so two officers can't verify the same application twice.
+    const locked = await Application.findOne({ where: { id: applicationID }, lock: t.LOCK.UPDATE, transaction: t });
+    if (String(locked.status || "").toUpperCase() !== "BOARD_APPROVED") {
+      const e = new Error("This application was just verified by someone else."); e.status = 409; throw e;
+    }
+    issued = locked.license_number
+      ? { licenceNo: locked.license_number, skipped: [] } // keep a number already issued
+      : await allocateLicenceNumber(category, { transaction: t });
+    await locked.update({
+      status:                       "FINALIZING",
+      license_number:               issued.licenceNo,
+      license_issued_at:            now,
+      registration_fee_status:      "VERIFIED",
+      registration_fee_amount:      QUOTED_FEES.REGISTRATION[category] ?? raw.registration_fee_amount,
+      registration_fee_paid_at:     raw.registration_fee_paid_at || now,
+      registration_fee_verified_by: verified_by || "Accounts",
+      registration_fee_verified_at: now,
+      registration_fee_comment:     comment ? String(comment).trim() : null,
+    }, { transaction: t });
   });
-  if (clash) {
-    const err = new Error(`Licence number ${licenceNo} is already assigned to ${trackingNumber(clash.id)}.`);
-    err.status = 409;
-    throw err;
+
+  logApplicationEvent(application.id, {
+    event:       "REGISTRATION_FEE_VERIFIED",
+    message:     `Registration fee verified — licence number ${issued.licenceNo} issued (pending final confirmation by Registration).${comment && String(comment).trim() ? ` ${String(comment).trim()}` : ""}`,
+    author_name: verified_by || "Accounts",
+    author_role: "ACCOUNTS",
+  });
+  if (issued.skipped?.length) console.log(`[registration-fee] ${trackingNumber(application.id)}: skipped numbers already in use → ${issued.skipped.join(", ")}`);
+
+  return { application_status: "FINALIZING", license_number: issued.licenceNo, category, registration_type: registrationTypeFor(category) };
+}
+
+async function rejectRegistrationFee(applicationID, { rejected_by, comment }) {
+  if (!comment || !String(comment).trim()) { const e = new Error("Please say why the payment is being rejected."); e.status = 400; throw e; }
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) { const e = new Error("Application not found"); e.status = 404; throw e; }
+  const raw = application.toJSON();
+  if (String(raw.status || "").toUpperCase() !== "BOARD_APPROVED") {
+    const e = new Error(`Only applications awaiting their registration fee can be rejected here (current status: ${raw.status}).`);
+    e.status = 400; throw e;
   }
+  // Stays on the Registration fee tab; the applicant can pay / attach again.
+  await application.update({
+    registration_fee_status:  "REJECTED",
+    registration_fee_comment: String(comment).trim(),
+  });
+  logApplicationEvent(application.id, {
+    event: "REGISTRATION_FEE_REJECTED", message: `Registration fee payment not accepted: ${String(comment).trim()}`,
+    author_name: rejected_by || "Accounts", author_role: "ACCOUNTS",
+  });
+  try {
+    await applicationStatusEmailQueue.add("registration-fee-rejected-email", {
+      type: "COMMENT", to: raw.email_address, applicantName: formatApplicantName(raw),
+      trackingNumber: trackingNumber(application.id), applicationType: raw.type,
+      reason: `Your registration fee payment could not be verified: ${String(comment).trim()} Please pay again or attach a valid receipt on the portal.`,
+      authorName: "ERB Accounts",
+    }, { attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: false });
+  } catch (e) { console.error("Failed to queue registration-fee-rejected email:", e.message); }
+  return { application_status: "BOARD_APPROVED", registration_fee_status: "REJECTED" };
+}
+
+router.post("/registration_fee/verify", async (req, res) => {
+  const { applicationID, verified_by, comment } = req.body || {};
+  try {
+    const result = await verifyRegistrationFee(applicationID, { verified_by, comment });
+    return res.status(200).json({ message: `Payment verified — licence number ${result.license_number} issued; application moved to Finalizing`, ...result });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Failed to verify registration fee:", error);
+    return res.status(500).json({ message: "Failed to verify registration fee" });
+  }
+});
+
+router.post("/registration_fee/reject", async (req, res) => {
+  const { applicationID, rejected_by, comment } = req.body || {};
+  try {
+    const result = await rejectRegistrationFee(applicationID, { rejected_by, comment });
+    return res.status(200).json({ message: "Payment rejected — the applicant has been asked to pay again", ...result });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Failed to reject registration fee:", error);
+    return res.status(500).json({ message: "Failed to reject registration fee" });
+  }
+});
+
+// Next numbers in each series — for a quick check from the admin side.
+router.get("/licence_numbers/next", async (_req, res) => {
+  try { return res.json(await peekLicenceNumbers()); }
+  catch (error) { console.error("[licence_numbers/next]", error.message); return res.status(500).json({ message: "Could not read licence number series" }); }
+});
+
+// ── Finalizing → Registered ─────────────────────────────────────────
+// Registration confirms an application in FINALIZING (fee verified, licence
+// number already issued). This registers the engineer:
+//   • status REGISTERED
+//   • old_users: registered = "Yes", licence_no, type
+//   • a new row in the engineers register (erb_engineer)
+//   • "Registration complete" email with the licence number
+async function finalizeRegistration(applicationID, { comment, registered_by }) {
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) { const e = new Error("Application not found"); e.status = 404; throw e; }
+  const raw = application.toJSON();
+  if (String(raw.status || "").toUpperCase() !== "FINALIZING") {
+    const e = new Error(`Only applications in Finalizing can be confirmed (current status: ${raw.status}).`);
+    e.status = 400; throw e;
+  }
+  const licenceNo = String(raw.license_number || "").trim();
+  if (!licenceNo) {
+    const e = new Error("This application has no licence number yet — Accounts must verify the registration fee first.");
+    e.status = 400; throw e;
+  }
+  const category = registrationCategoryFor(raw);
+  const regType  = registrationTypeFor(category);
 
   const now = new Date();
   await application.update({
     status:               "REGISTERED",
-    license_number:       licenceNo,
     registered_by:        registered_by || "Admin",
     registered_at:        now,
     registration_comment: comment ? String(comment).trim() : null,
@@ -2200,25 +2364,40 @@ async function finalizeRegistration(applicationID, { license_number, comment, re
 
   logApplicationEvent(application.id, {
     event:       "REGISTERED",
-    message:     `Registration finalized — licence number ${licenceNo}.${comment && String(comment).trim() ? ` ${String(comment).trim()}` : ""}`,
+    message:     `Registration confirmed — licence number ${licenceNo} (${regType}).${comment && String(comment).trim() ? ` ${String(comment).trim()}` : ""}`,
     author_name: registered_by || "Admin",
     author_role: "REGISTRATION",
   });
 
-  // ── Mirror onto the legacy old_users table (best-effort) ─────────
-  // See models/OldUser.js — the join key (email) and column names are a
-  // best guess pending confirmation. A failure is logged, never fatal.
-  if (raw.email_address) {
-    try {
-      const oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
-      if (oldUser) {
-        await oldUser.update({ registered: "Yes", license_number: licenceNo });
-      } else {
-        console.warn(`[finalize] No old_users row found for ${raw.email_address} — registered flag not updated.`);
-      }
-    } catch (oldUserError) {
-      console.error("[finalize] Failed to update old_users row:", oldUserError);
+  // ── old_users: registered = Yes, licence_no, type ────────────────
+  // Matched by id (erb_applications.applicant_id is the old_users id),
+  // then by email. Best-effort: logged, never fails the confirmation.
+  let oldUserUpdated = false;
+  try {
+    let oldUser = raw.applicant_id ? await OldUser.findOne({ where: { id: raw.applicant_id } }) : null;
+    if (!oldUser && raw.email_address) oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
+    if (oldUser) {
+      await oldUser.update({ registered: "Yes", licence_no: licenceNo, type: regType });
+      oldUserUpdated = true;
+    } else {
+      console.warn(`[finalize] No old_users row for applicant ${raw.applicant_id} / ${raw.email_address} — not updated.`);
     }
+  } catch (oldUserError) {
+    console.error("[finalize] Failed to update old_users row:", oldUserError.message);
+  }
+
+  // ── erb_engineer: add to the engineers register (best-effort) ────
+  let register = { inserted: false };
+  try {
+    register = await addToEngineerRegister(raw, { regNo: licenceNo, regType });
+    if (register.inserted) {
+      console.log(`[finalize] ${trackingNumber(application.id)} added to erb_engineer (id ${register.id}) as ${licenceNo}`);
+    } else {
+      console.warn(`[finalize] ${trackingNumber(application.id)} not added to erb_engineer: ${register.reason}`);
+    }
+  } catch (registerError) {
+    register = { inserted: false, reason: registerError.message };
+    console.error("[finalize] Failed to add to erb_engineer:", registerError.message);
   }
 
   try {
@@ -2245,15 +2424,20 @@ async function finalizeRegistration(applicationID, { license_number, comment, re
     console.error("Failed to queue registration-complete email (registration was still recorded):", emailQueueError);
   }
 
-  return { application_status: "REGISTERED", license_number: licenceNo, registered_at: now };
+  return {
+    application_status: "REGISTERED", license_number: licenceNo, registration_type: regType, registered_at: now,
+    old_user_updated: oldUserUpdated,
+    engineer_register: register.inserted ? "added" : `not added — ${register.reason}`,
+  };
 }
 
 // ── POST /finalize ───────────────────────────────────────────────
-// Body: { applicationID, license_number, comment?, registered_by }
+// Body: { applicationID, comment?, registered_by } — the licence number was
+// issued when Accounts verified the registration fee.
 router.post("/finalize", async (req, res) => {
-  const { applicationID, license_number, comment, registered_by } = req.body || {};
+  const { applicationID, comment, registered_by } = req.body || {};
   try {
-    const result = await finalizeRegistration(applicationID, { license_number, comment, registered_by });
+    const result = await finalizeRegistration(applicationID, { comment, registered_by });
     return res.status(200).json({ message: "Registration finalized — the engineer is now registered", ...result });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ message: error.message });

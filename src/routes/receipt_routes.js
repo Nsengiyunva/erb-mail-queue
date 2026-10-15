@@ -171,7 +171,9 @@ router.post('/registration-payment', upload.single('receipt'), async (req, res) 
       cleanup()
       return res.status(400).json({ message: 'Registration fees can only be paid once the Board has approved the application.' })
     }
-    if (['SUCCESS', 'PAID', 'SUBMITTED'].includes(String(raw.registration_fee_status || '').toUpperCase())) {
+    // REJECTED (by Accounts) may pay again; anything already submitted or
+    // verified may not.
+    if (['SUCCESS', 'PAID', 'SUBMITTED', 'VERIFIED'].includes(String(raw.registration_fee_status || '').toUpperCase())) {
       cleanup()
       return res.status(409).json({ message: 'A registration fee payment is already recorded for this application.' })
     }

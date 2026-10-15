@@ -119,7 +119,9 @@ export function feeCategoryFrom({ regNo, record } = {}) {
   if (bf.includes('TEMP'))     return 'TEMPORARY'
   if (bf.includes('TECHNICI')) return 'TECHNICIAN'
   if (bf.includes('TECHNOLO')) return 'TECHNOLOGIST'
-  if (regPrefix(regNo) === 'TR') return 'TEMPORARY'
+  if (regPrefix(regNo) === 'TR')  return 'TEMPORARY'
+  if (regPrefix(regNo) === 'ETG') return 'TECHNOLOGIST'
+  if (regPrefix(regNo) === 'ETN') return 'TECHNICIAN'
   if (bf.includes('PERM') || bf.includes('CORP')) return 'CORPORATE'
   return null
 }
