@@ -402,7 +402,7 @@ import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, advanceIfPaymentAlreadyVerified } from "../controllers/receipt-controller.js";
-import { resolveQuotedFee, erbFeeFor, QUOTED_FEES } from "../utils/fee-schedule.js";
+import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
 import {
@@ -2663,12 +2663,8 @@ router.post("/defer_bulk", async (req, res) => {
 // Distinct from the application fee (paid at submission, see
 // License/forms/Payment.js on the frontend). Keyed by application
 // `type`/`category` the same way the frontend's app_fees table is.
-const REGISTRATION_FEES = {
-  CORPORATE:    1055900,
-  TEMPORARY:    3045700,
-  TECHNOLOGIST:  761450,
-  TECHNICIAN:    609150,
-};
+// Charged (gateway-inclusive) amounts — see CHARGED_FEES in fee-schedule.js.
+const REGISTRATION_FEES = CHARGED_FEES.REGISTRATION;
 
 // Same category as the approval letter (ERA1 Engineer / ERA2 Temporary /
 // ERA3 Technologist or Technician) — see registrationCategoryFor.
@@ -2688,11 +2684,19 @@ router.get("/registration_fee/:id", async (req, res) => {
     if (!application) {
       return res.status(404).json({ message: "Application not found" });
     }
-    const raw    = application.toJSON();
-    const amount = resolveRegistrationFee(raw);
+    const raw      = application.toJSON();
+    const category = registrationCategoryFor(raw);
+    const amount   = resolveRegistrationFee(raw);
     return res.status(200).json({
       message: "Registration fee resolved",
+      // Same category as the approval letter (ERA1/ERA2/ERA3 rules).
+      category,
+      category_label: LETTER_TEMPLATES[category]?.label || null,
+      // `amount` = charged to the phone (kept for older clients);
+      // `quoted_amount` = what the applicant should see.
       amount,
+      charged_amount: amount,
+      quoted_amount:  QUOTED_FEES.REGISTRATION[category] ?? null,
       status: raw.registration_fee_status || "NOT_PAID",
       paid_at: raw.registration_fee_paid_at,
     });
@@ -2737,9 +2741,12 @@ router.post("/registration_fee/initiate", async (req, res) => {
       registration_fee_status: "INITIATED",
     });
 
+    const category = registrationCategoryFor(raw);
     return res.status(200).json({
       message: "Registration fee payment initiated",
-      amount,
+      category,
+      amount,                                   // charged to the phone
+      quoted_amount: QUOTED_FEES.REGISTRATION[category] ?? null,
       phone,
     });
   } catch (error) {

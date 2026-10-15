@@ -13,7 +13,8 @@ import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalA
 import { parseReceiptWorkbook }        from '../utils/receipt-excel.js'
 import { generateEngineerReceiptPdf }  from '../utils/receipt-pdf.js'
 import { getLicenceStatus }            from '../utils/licence-status.js'
-import { erbFeeFor, resolveQuotedFee }  from '../utils/fee-schedule.js'
+import { erbFeeFor, resolveQuotedFee, QUOTED_FEES, CHARGED_FEES } from '../utils/fee-schedule.js'
+import { registrationCategoryFor } from '../utils/approval-letter.js'
 import { Application }                 from '../models/index.js'
 
 const router  = express.Router()
@@ -147,6 +148,80 @@ router.post('/save-transaction', saveTransaction)
 // immediately rather than leaving it pending review.
 router.options('/renewal-payment', cors(corsOptions), (_req, res) => res.sendStatus(204))
 router.post('/renewal-payment', upload.single('receipt'), submitReceiptPayment)
+
+// ── POST /registration-payment ─────────────────────────────────────
+// Registration fee (after Board approval) paid by bank / MoMo outside the
+// portal, with the receipt attached — called by RegistrationInstantPayment.js
+// ("Attach Receipt"). This endpoint didn't exist before, so those uploads
+// were failing with a 404.
+// Amounts are resolved HERE from the application (same category as its
+// approval letter), not taken from the browser:
+//   quoted_amount = displayed fee, amount = charged (gateway-inclusive).
+router.post('/registration-payment', upload.single('receipt'), async (req, res) => {
+  const cleanup = () => { if (req.file?.path) fs.unlink(req.file.path, () => {}) }
+  try {
+    const { application_id, applicant_id, applicant_name, phone, email } = req.body || {}
+    if (!req.file) return res.status(400).json({ message: 'A receipt file is required' })
+    if (!/^\d+$/.test(String(application_id || ''))) { cleanup(); return res.status(400).json({ message: 'A valid application_id is required' }) }
+
+    const application = await Application.findOne({ where: { id: application_id } })
+    if (!application) { cleanup(); return res.status(404).json({ message: 'Application not found' }) }
+    const raw = application.toJSON()
+    if (String(raw.status || '').toUpperCase() !== 'BOARD_APPROVED') {
+      cleanup()
+      return res.status(400).json({ message: 'Registration fees can only be paid once the Board has approved the application.' })
+    }
+    if (['SUCCESS', 'PAID', 'SUBMITTED'].includes(String(raw.registration_fee_status || '').toUpperCase())) {
+      cleanup()
+      return res.status(409).json({ message: 'A registration fee payment is already recorded for this application.' })
+    }
+
+    const category = registrationCategoryFor(raw)
+    const quoted   = QUOTED_FEES.REGISTRATION[category] ?? null
+    const charged  = CHARGED_FEES.REGISTRATION[category] ?? null
+    const ref      = `REGISTRATION-RCPT-${Date.now()}-${raw.id}`
+    const receipt  = path.basename(req.file.path)
+
+    const [record] = await PaymentTransaction.upsert({
+      application_id:      String(raw.id),
+      transaction_ref:     ref,
+      phone:               phone || raw.telephone || null,
+      provider:            'RECEIPT',
+      // Receipt payments are the ERB fee itself (no gateway charges).
+      amount:              quoted,
+      quoted_amount:       quoted,
+      fee_category:        category,
+      applicant_name:      applicant_name || formatApplicantName(raw),
+      applicant_id:        applicant_id ? parseInt(applicant_id, 10) : raw.applicant_id,
+      status:              'SUCCESS',
+      purpose:             'REGISTRATION',
+      payment_method:      'RECEIPT',
+      registration_number: String(raw.id),
+      receipt_path:        receipt,
+      email:               email || raw.email_address || null,
+    })
+
+    await application.update({
+      registration_fee_amount: quoted,
+      registration_fee_status: 'SUBMITTED',
+      registration_fee_ref:    ref,
+    })
+
+    return res.status(201).json({
+      message: 'Registration fee receipt recorded — Accounts will verify it.',
+      status:  'SUBMITTED',
+      transaction_ref: ref,
+      id:      record?.id,
+      category,
+      quoted_amount:  quoted,
+      charged_amount: charged,
+    })
+  } catch (err) {
+    cleanup()
+    console.error('[registration-payment]', err.message)
+    return res.status(500).json({ message: 'Failed to record registration fee payment' })
+  }
+})
 
 // ── GET /transactions ─────────────────────────────────────────────
 // Admin: returns all transactions (most recent first, paginated).

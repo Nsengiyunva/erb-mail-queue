@@ -20,6 +20,22 @@ export const QUOTED_FEES = {
   },
 }
 
+// ── Charged (gateway-inclusive) amounts — what is actually sent to the
+// applicant's phone for deduction. QUOTED_FEES above is what is displayed.
+// Registration (after Board approval):
+//   Permanent    1,040,000 shown → 1,055,900 charged
+//   Temporary    3,000,000 shown → 3,045,700 charged
+//   Technologist   750,000 shown →   761,450 charged
+//   Technician     600,000 shown →   609,150 charged
+export const CHARGED_FEES = {
+  REGISTRATION: {
+    CORPORATE:    1055900,
+    TEMPORARY:    3045700,
+    TECHNOLOGIST:  761450,
+    TECHNICIAN:    609150,
+  },
+}
+
 // Same category-matching convention already used across the frontend
 export function resolveFeeCategory(category) {
   const c = String(category || '').toLowerCase().trim()
