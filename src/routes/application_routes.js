@@ -1496,6 +1496,8 @@ router.get("/registry", async (req, res) => {
           ? (payment.updatedAt || payment.createdAt)
           : (accountsConfirmedPaid ? raw.accounts_verified_at : null),
         submitted_at:      raw.updated_at || raw.created_at,
+        license_number:    raw.license_number || null,
+        registration_fee_status: raw.registration_fee_status || null,
       };
     });
 
@@ -2065,7 +2067,7 @@ router.post("/accounts_defer_bulk", async (req, res) => {
 // above — used by both the single routes (POST /board_approve, /defer)
 // and their bulk counterparts (POST /board_approve_bulk, /defer_bulk) for
 // the Board Review checkbox-select UI.
-async function approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number, letter }) {
+async function approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, letter }) {
   if (!applicationID || !comment || !comment.trim()) {
     const err = new Error("applicationID and a comment are both required");
     err.status = 400;
@@ -2088,8 +2090,6 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
     throw err;
   }
 
-  const trimmedLicenseNumber = license_number ? String(license_number).trim() : null;
-
   // ── Approval letter — prepared BEFORE the status flips, so a letter
   // problem (missing meeting number, bad upload) fails the approval cleanly
   // instead of leaving an approved application with no letter.
@@ -2101,7 +2101,6 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
     board_comment:       comment.trim(),
     board_approved_by:   approved_by || "Admin",
     board_approved_at:   new Date(),
-    ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
     approval_letter_path: approvalLetter.filename,
     approval_letter_meta: JSON.stringify(approvalLetter.meta),
   });
@@ -2110,26 +2109,9 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
     event: "BOARD_APPROVED", message: comment, author_name: approved_by || "Admin", author_role: "REGISTRATION",
   });
 
-  // ── Mirror the approval onto the legacy old_users table ──────────
-  // See models/OldUser.js — the join key (email) and column names are
-  // a best guess pending confirmation. Failure here is logged but
-  // never fails the approval itself: the application record is the
-  // source of truth, and this is a best-effort mirror of it.
-  if (raw.email_address) {
-    try {
-      const oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
-      if (oldUser) {
-        await oldUser.update({
-          registered: "Yes",
-          ...(trimmedLicenseNumber ? { license_number: trimmedLicenseNumber } : {}),
-        });
-      } else {
-        console.warn(`[board_approve] No old_users row found for ${raw.email_address} — registered flag not updated.`);
-      }
-    } catch (oldUserError) {
-      console.error("[board_approve] Failed to update old_users row:", oldUserError);
-    }
-  }
+  // NOTE: the old_users "registered" flag + licence number are no longer
+  // set here — the engineer is only registered once the Registration
+  // officer finalizes and issues the licence number (POST /finalize).
 
   // Applicant-facing approval email — now also carries the registration
   // fee due next and how to pay it (see buildEmail's APPROVED branch in
@@ -2143,7 +2125,6 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
         applicantName:     formatApplicantName(raw),
         trackingNumber:    trackingNumber(application.id),
         applicationType:   raw.type,
-        licenseNumber:     trimmedLicenseNumber,
         applicationId:     application.id,
         registrationFee:   resolveQuotedFee("REGISTRATION", raw.category || raw.profession),
         // Approval letter rides on this one email — the worker attaches it
@@ -2166,10 +2147,119 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
 
   return {
     application_status: application.status,
-    license_number:     trimmedLicenseNumber,
     approval_letter_path: approvalLetter.filename,
   };
 }
+
+// ── Finalizing → Registered ─────────────────────────────────────────
+// After Board approval (BOARD_APPROVED, the "Finalizing" tab) the
+// Registration officer issues the licence number. That registers the
+// engineer: status REGISTERED, old_users flagged registered + licence no.,
+// thread entry, and a "registration complete" email with the number.
+async function finalizeRegistration(applicationID, { license_number, comment, registered_by }) {
+  const licenceNo = String(license_number || "").trim();
+  if (!applicationID || !licenceNo) {
+    const err = new Error("A licence number is required to finalize registration.");
+    err.status = 400;
+    throw err;
+  }
+
+  const application = await Application.findOne({ where: { id: applicationID } });
+  if (!application) {
+    const err = new Error("Application not found");
+    err.status = 404;
+    throw err;
+  }
+  const raw = application.toJSON();
+  if (String(raw.status || "").toUpperCase() !== "BOARD_APPROVED") {
+    const err = new Error(`Only applications in Finalizing can be registered (current status: ${raw.status}).`);
+    err.status = 400;
+    throw err;
+  }
+
+  // Licence numbers must be unique across applications.
+  const clash = await Application.findOne({
+    where: { license_number: licenceNo, id: { [Op.ne]: application.id } },
+    attributes: ["id"],
+  });
+  if (clash) {
+    const err = new Error(`Licence number ${licenceNo} is already assigned to ${trackingNumber(clash.id)}.`);
+    err.status = 409;
+    throw err;
+  }
+
+  const now = new Date();
+  await application.update({
+    status:               "REGISTERED",
+    license_number:       licenceNo,
+    registered_by:        registered_by || "Admin",
+    registered_at:        now,
+    registration_comment: comment ? String(comment).trim() : null,
+  });
+
+  logApplicationEvent(application.id, {
+    event:       "REGISTERED",
+    message:     `Registration finalized — licence number ${licenceNo}.${comment && String(comment).trim() ? ` ${String(comment).trim()}` : ""}`,
+    author_name: registered_by || "Admin",
+    author_role: "REGISTRATION",
+  });
+
+  // ── Mirror onto the legacy old_users table (best-effort) ─────────
+  // See models/OldUser.js — the join key (email) and column names are a
+  // best guess pending confirmation. A failure is logged, never fatal.
+  if (raw.email_address) {
+    try {
+      const oldUser = await OldUser.findOne({ where: { email: raw.email_address } });
+      if (oldUser) {
+        await oldUser.update({ registered: "Yes", license_number: licenceNo });
+      } else {
+        console.warn(`[finalize] No old_users row found for ${raw.email_address} — registered flag not updated.`);
+      }
+    } catch (oldUserError) {
+      console.error("[finalize] Failed to update old_users row:", oldUserError);
+    }
+  }
+
+  try {
+    await applicationStatusEmailQueue.add(
+      "application-registered-email",
+      {
+        type:            "REGISTERED",
+        to:              raw.email_address,
+        applicantName:   formatApplicantName(raw),
+        trackingNumber:  trackingNumber(application.id),
+        applicationType: raw.type,
+        licenseNumber:   licenceNo,
+        applicationId:   application.id,
+      },
+      {
+        jobId: `registered-${application.id}`,
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: false,
+      }
+    );
+  } catch (emailQueueError) {
+    console.error("Failed to queue registration-complete email (registration was still recorded):", emailQueueError);
+  }
+
+  return { application_status: "REGISTERED", license_number: licenceNo, registered_at: now };
+}
+
+// ── POST /finalize ───────────────────────────────────────────────
+// Body: { applicationID, license_number, comment?, registered_by }
+router.post("/finalize", async (req, res) => {
+  const { applicationID, license_number, comment, registered_by } = req.body || {};
+  try {
+    const result = await finalizeRegistration(applicationID, { license_number, comment, registered_by });
+    return res.status(200).json({ message: "Registration finalized — the engineer is now registered", ...result });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Failed to finalize registration:", error);
+    return res.status(500).json({ message: "Failed to finalize registration" });
+  }
+});
 
 // ── Approval letter helpers ────────────────────────────────────────
 // `letter` (from the request body) is either
@@ -2418,9 +2508,9 @@ async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_
 // request body for the audit trail — worth tightening with real
 // server-side auth before this is relied on for compliance purposes.
 router.post("/board_approve", async (req, res) => {
-  const { applicationID, comment, approved_by, license_number, letter } = req.body || {};
+  const { applicationID, comment, approved_by, letter } = req.body || {};
   try {
-    const result = await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, license_number, letter });
+    const result = await approveApplicationOnBoardBehalf(applicationID, { comment, approved_by, letter });
     return res.status(200).json({
       message: "Application approved on behalf of the Board",
       ...result,

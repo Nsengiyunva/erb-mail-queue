@@ -90,6 +90,12 @@ export default (sequelize, DataTypes) => {
       // approval (see /board_approve) — optional, since not every
       // applicant type is issued a licence number at this step.
       license_number:                   DataTypes.STRING,
+      // Finalizing → Registered (see POST /finalize). The Registration
+      // officer issues the licence number at this step, after the Board
+      // approval (BOARD_APPROVED / "Finalizing").
+      registered_by:                    DataTypes.STRING,
+      registered_at:                    DataTypes.DATE,
+      registration_comment:             DataTypes.TEXT,
       // Board approval letter (see utils/approval-letter.js). Generated —
       // or uploaded — by the Registration officer at /board_approve and
       // emailed to the applicant exactly once, attached to the approval

@@ -108,6 +108,25 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
     };
   }
 
+  if (type === 'REGISTERED') {
+    return {
+      subject: `ERB: Registration Complete${licenseNumber ? ` — Licence No. ${licenseNumber}` : ''}`,
+      body: `
+        <h2 style="margin-top:0;">Dear ${name},</h2>
+        <p>Your registration with the Engineers Registration Board is now complete.</p>
+        ${trackingLine}
+        ${licenseNumber ? `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;margin:18px 0;text-align:center;">
+          <p style="margin:0;color:#065f46;font-size:13px;">Your licence number</p>
+          <p style="margin:6px 0 0;color:#065f46;font-size:22px;font-weight:bold;letter-spacing:1px;">${escapeHtml(licenseNumber)}</p>
+        </div>` : ''}
+        <p>Please quote this number in all correspondence with the Board. You can view your registration and licence details on the ERB portal.</p>
+        <p style="text-align:center;margin:28px 0;">
+          <a href="${PORTAL_URL}" style="background-color:#065f46;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Open ERB Portal</a>
+        </p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
   if (type === 'COMMENT') {
     return {
       subject: `ERB: New Comment on Your Application${trackingNumber ? ` — ${trackingNumber}` : ''}`,
@@ -169,7 +188,7 @@ const worker = new Worker(
       await job.updateProgress(10);
 
       if (!to) throw new Error('Missing applicant email');
-      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'COMMENT', 'INACTIVITY_WARNING', 'INACTIVITY_DELETED'].includes(type)) {
+      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'REGISTERED', 'COMMENT', 'INACTIVITY_WARNING', 'INACTIVITY_DELETED'].includes(type)) {
         throw new Error(`Unknown application status email type: ${type}`);
       }
 
