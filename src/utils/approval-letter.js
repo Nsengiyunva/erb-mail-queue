@@ -203,9 +203,45 @@ for (const [key, t] of Object.entries(LETTER_TEMPLATES)) {
   }
 }
 
+// Which letter template (and registration fee) applies — driven by the
+// APPLICATION TYPE, not the discipline:
+//   ERA1 → Engineer (CORPORATE)
+//   ERA2 → Temporary
+//   ERA3 → Technologist or Technician — from `profession`, which the
+//          wizard sets to "Technician" / "Technologist" for ERA3
+// `category` often holds the discipline ("Civil"), so it is only used as a
+// hint, never as the deciding field.
+const techHint = (v) => {
+  const s = String(v || "").toLowerCase();
+  if (s.includes("technici")) return "TECHNICIAN";
+  if (s.includes("technolo")) return "TECHNOLOGIST";
+  return null;
+};
 export function letterCategoryFor(application) {
-  return resolveFeeCategory(application?.category || application?.profession);
+  const type = String(application?.type || "").trim().toUpperCase();
+  const prof = application?.profession;
+  const cat  = application?.category;
+  if (type === "ERA2") return "TEMPORARY";
+  if (type === "ERA3") return techHint(prof) || techHint(cat) || "TECHNOLOGIST";
+  if (type === "ERA1") return "CORPORATE";
+  // Unknown/legacy type: fall back to profession, then category.
+  if (/temp/i.test(String(prof || "")) || /temp/i.test(String(cat || ""))) return "TEMPORARY";
+  return techHint(prof) || techHint(cat) || resolveFeeCategory(prof || cat);
 }
+
+// Category for the registration fee once approved: whatever the approval
+// letter actually said (officer may have overridden the template), else
+// the type-based default above.
+export function registrationCategoryFor(application) {
+  try {
+    const meta = application?.approval_letter_meta ? JSON.parse(application.approval_letter_meta) : null;
+    if (meta?.category && LETTER_TEMPLATES[meta.category]) return meta.category;
+  } catch { /* bad JSON → default */ }
+  return letterCategoryFor(application);
+}
+
+export const LETTER_TEMPLATE_OPTIONS = () =>
+  Object.entries(LETTER_TEMPLATES).map(([key, t]) => ({ key, label: t.label, heading: t.heading }));
 
 // ── Formatting helpers ──────────────────────────────────────────────
 const ordinal = (n) => {
@@ -303,7 +339,10 @@ const salutationName = (application) =>
 
 // Normalise whatever the officer submitted into a complete options object.
 export function resolveLetterOptions(application, input = {}) {
-  const category = letterCategoryFor(application);
+  // Officer may override the template (e.g. an ERA3 applicant whose
+  // Technician/Technologist choice is missing); otherwise type-based.
+  const override = String(input.template || "").trim().toUpperCase();
+  const category = LETTER_TEMPLATES[override] ? override : letterCategoryFor(application);
   const salutation = SALUTATIONS.includes(String(input.salutation || "").trim())
     ? String(input.salutation).trim()
     : (input.salutation === "" ? "" : defaultSalutation(application));

@@ -402,13 +402,13 @@ import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, advanceIfPaymentAlreadyVerified } from "../controllers/receipt-controller.js";
-import { resolveQuotedFee, erbFeeFor } from "../utils/fee-schedule.js";
+import { resolveQuotedFee, erbFeeFor, QUOTED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
 import {
   renderApprovalLetter, saveApprovalLetter, resolveLetterOptions, validateLetterOptions,
   letterCategoryFor, LETTER_TEMPLATES, defaultSalutation, defaultAddressLines, defaultReferenceNo,
-  todayISO, approvalLetterFilename,
+  todayISO, approvalLetterFilename, registrationCategoryFor, LETTER_TEMPLATE_OPTIONS,
 } from "../utils/approval-letter.js";
 
 const router = express.Router();
@@ -2126,7 +2126,8 @@ async function approveApplicationOnBoardBehalf(applicationID, { comment, approve
         trackingNumber:    trackingNumber(application.id),
         applicationType:   raw.type,
         applicationId:     application.id,
-        registrationFee:   resolveQuotedFee("REGISTRATION", raw.category || raw.profession),
+        // Same category as the letter, so the email and the letter agree.
+        registrationFee:   QUOTED_FEES.REGISTRATION[approvalLetter.meta.category] ?? null,
         // Approval letter rides on this one email — the worker attaches it
         // and stamps approval_letter_sent_at, so it is only ever sent once.
         approvalLetter:    { filename: approvalLetter.filename, displayName: approvalLetter.displayName },
@@ -2269,7 +2270,8 @@ router.post("/finalize", async (req, res) => {
 const APPROVAL_LETTER_PREFIX_RE = /^[\w.\-]+\.pdf$/i;
 
 async function prepareApprovalLetter(raw, letter, approvedBy) {
-  const category = letterCategoryFor(raw);
+  const override = String(letter?.template || "").trim().toUpperCase();
+  const category = LETTER_TEMPLATES[override] ? override : letterCategoryFor(raw);
   const base = {
     category,
     category_label: LETTER_TEMPLATES[category]?.label,
@@ -2310,6 +2312,8 @@ async function prepareApprovalLetter(raw, letter, approvedBy) {
     displayName: saved.displayName,
     meta: {
       ...base,
+      category:       saved.options.category,
+      category_label: LETTER_TEMPLATES[saved.options.category]?.label,
       source:         "GENERATED",
       meeting_number: saved.options.meeting_number,
       meeting_date:   saved.options.meeting_date,
@@ -2361,6 +2365,9 @@ router.get("/:id/approval_letter/defaults", async (req, res) => {
       category,
       category_label: LETTER_TEMPLATES[category]?.label,
       heading:        LETTER_TEMPLATES[category]?.heading,
+      application_type: raw.type || null,
+      profession:     raw.profession || null,
+      templates:      LETTER_TEMPLATE_OPTIONS(),
       recipient_name: formatApplicantName(raw),
       salutation:     defaultSalutation(raw),
       address_lines:  defaultAddressLines(raw),
@@ -2663,11 +2670,10 @@ const REGISTRATION_FEES = {
   TECHNICIAN:    609150,
 };
 
+// Same category as the approval letter (ERA1 Engineer / ERA2 Temporary /
+// ERA3 Technologist or Technician) — see registrationCategoryFor.
 function resolveRegistrationFee(application) {
-  const key = String(application.category || application.profession || application.type || "")
-    .trim()
-    .toUpperCase();
-  return REGISTRATION_FEES[key] ?? null;
+  return REGISTRATION_FEES[registrationCategoryFor(application)] ?? null;
 }
 
 // ── GET /registration_fee/:id ────────────────────────────────────
