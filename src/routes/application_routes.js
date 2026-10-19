@@ -405,6 +405,7 @@ import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, a
 import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
+import { commentToHtml, sanitizeRichText, isRichText, richTextToPlain } from "../utils/rich-text.js";
 import { allocateLicenceNumber, registrationTypeFor, peekLicenceNumbers } from "../utils/licence-numbers.js";
 import { addToEngineerRegister } from "../utils/engineer-register.js";
 import {
@@ -1611,9 +1612,15 @@ router.post("/:id/comments", async (req, res) => {
   }
   try {
     const { message, author_name, visibility } = req.body || {};
-    const text = String(message || "").trim();
-    if (!text) return res.status(400).json({ message: "Please type a comment first" });
-    if (text.length > 5000) return res.status(400).json({ message: "Comments are limited to 5,000 characters" });
+    // Comments from the rich-text editor arrive as HTML: keep only the
+    // allowlisted formatting tags before storing. Length limits apply to
+    // the visible text, not the markup.
+    const rawText = String(message || "").trim();
+    const text = isRichText(rawText) ? sanitizeRichText(rawText) : rawText;
+    const visible = richTextToPlain(text);
+    if (!visible) return res.status(400).json({ message: "Please type a comment first" });
+    if (visible.length > 5000) return res.status(400).json({ message: "Comments are limited to 5,000 characters" });
+    if (text.length > 20000) return res.status(400).json({ message: "This comment has too much formatting — please shorten it" });
 
     const application = await Application.findOne({ where: { id: req.params.id } });
     if (!application) return res.status(404).json({ message: "Application not found" });
@@ -2287,14 +2294,14 @@ async function rejectRegistrationFee(applicationID, { rejected_by, comment }) {
     registration_fee_comment: String(comment).trim(),
   });
   logApplicationEvent(application.id, {
-    event: "REGISTRATION_FEE_REJECTED", message: `Registration fee payment not accepted: ${String(comment).trim()}`,
+    event: "REGISTRATION_FEE_REJECTED", message: `<p>Registration fee payment not accepted:</p>${commentToHtml(String(comment).trim(), null)}`,
     author_name: rejected_by || "Accounts", author_role: "ACCOUNTS",
   });
   try {
     await applicationStatusEmailQueue.add("registration-fee-rejected-email", {
       type: "COMMENT", to: raw.email_address, applicantName: formatApplicantName(raw),
       trackingNumber: trackingNumber(application.id), applicationType: raw.type,
-      reason: `Your registration fee payment could not be verified: ${String(comment).trim()} Please pay again or attach a valid receipt on the portal.`,
+      reason: `<p>Your registration fee payment could not be verified:</p>${commentToHtml(String(comment).trim(), null)}<p>Please pay again or attach a valid receipt on the portal.</p>`,
       authorName: "ERB Accounts",
     }, { attempts: 3, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: true, removeOnFail: false });
   } catch (e) { console.error("Failed to queue registration-fee-rejected email:", e.message); }

@@ -1,6 +1,7 @@
 import { Worker } from 'bullmq';
 import connection from '../redis/connection.js';
 import { sendStyledMail } from '../utils/mailer.js';
+import { commentToHtml, DEFAULT_STYLES } from '../utils/rich-text.js';
 import * as db from '../models/index.js';
 import fs from 'fs';
 import path from 'path';
@@ -27,6 +28,15 @@ const escapeHtml = (v) => String(v ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
   .replace(/\n/g, '<br/>');
+
+// Officer comments may be rich text (bold, lists…) or plain text — render
+// both as sanitised HTML with inline styles email clients respect.
+const commentHtml = (text, color) => commentToHtml(text, {
+  ...DEFAULT_STYLES,
+  p:  `${DEFAULT_STYLES.p}color:${color};`,
+  ul: `${DEFAULT_STYLES.ul}color:${color};`,
+  ol: `${DEFAULT_STYLES.ol}color:${color};`,
+});
 
 // One template per applicant-facing lifecycle event. Keeping all three
 // in one worker (rather than one queue per event) mirrors how close
@@ -62,7 +72,8 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
         <p>Your ${licenceLabel} application has been sent back for some updates before it can proceed.</p>
         ${trackingLine}
         <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px;margin:16px 0;">
-          <p style="margin:0;color:#78350f;"><strong>Reason:</strong> ${reason ? escapeHtml(reason) : 'Please review your application for the requested changes.'}</p>
+          <p style="margin:0 0 6px;color:#78350f;"><strong>Reason:</strong></p>
+          <div style="color:#78350f;line-height:1.5;">${commentHtml(reason, '#78350f') || '<p style="margin:0;">Please review your application for the requested changes.</p>'}</div>
         </div>
         <p>Please log in to the ERB portal, make the requested edits, and resubmit your application.</p>
         <p style="text-align:center;margin:28px 0;">
@@ -135,7 +146,7 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
         <p>An ERB officer has added a comment to your ${licenceLabel} application.</p>
         ${trackingLine}
         <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin:16px 0;">
-          <p style="margin:0 0 6px;color:#1e3a8a;">${escapeHtml(reason)}</p>
+          <div style="margin:0 0 6px;color:#1e3a8a;line-height:1.5;">${commentHtml(reason, '#1e3a8a')}</div>
           <p style="margin:0;color:#3b82f6;font-size:12px;">— ${escapeHtml(authorName || 'ERB Officer')}</p>
         </div>
         <p>Log in to the ERB portal and open your application to read the full thread or reply.</p>
