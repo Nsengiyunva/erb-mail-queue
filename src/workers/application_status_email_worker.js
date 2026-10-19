@@ -69,7 +69,7 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
       subject: `ERB: Updates Needed on Your Application${trackingNumber ? ` — ${trackingNumber}` : ''}`,
       body: `
         <h2 style="margin-top:0;">Dear ${name},</h2>
-        <p>Your ${licenceLabel} application has been sent back for some updates before it can proceed.</p>
+        <p>Your ERB professional registration application has been sent back for some updates before it can proceed.</p>
         ${trackingLine}
         <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px;margin:16px 0;">
           <p style="margin:0 0 6px;color:#78350f;"><strong>Reason:</strong></p>
@@ -143,7 +143,7 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
       subject: `ERB: New Comment on Your Application${trackingNumber ? ` — ${trackingNumber}` : ''}`,
       body: `
         <h2 style="margin-top:0;">Dear ${name},</h2>
-        <p>An ERB officer has added a comment to your ${licenceLabel} application.</p>
+        <p>Please receive comments on your ERB professional registration application, to address:</p>
         ${trackingLine}
         <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin:16px 0;">
           <div style="margin:0 0 6px;color:#1e3a8a;line-height:1.5;">${commentHtml(reason, '#1e3a8a')}</div>
