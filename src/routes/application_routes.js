@@ -607,6 +607,21 @@ router.post("/submit-application", async (req, res) => {
       });
     }
 
+    // The section lists are TEXT columns holding JSON. Accept them as arrays
+    // too (stringify here) instead of letting Sequelize throw a 500, and drop
+    // the wizard's `practicals` alias (the column is `training`).
+    for (const key of ["education", "engineering", "training", "positions", "membership", "sponsors"]) {
+      if (payload[key] !== undefined && payload[key] !== null && typeof payload[key] === "object") {
+        payload[key] = JSON.stringify(payload[key]);
+      }
+    }
+    if (payload.practicals !== undefined) {
+      if (payload.training === undefined) {
+        payload.training = typeof payload.practicals === "object" ? JSON.stringify(payload.practicals) : payload.practicals;
+      }
+      delete payload.practicals;
+    }
+
     const {
       applicant_id,
       email_address,
@@ -788,6 +803,14 @@ router.post("/submit-application", async (req, res) => {
     }
 
     console.error("Application submission failed:", error);
+
+    // Validation problems are the applicant's data, not a server fault — say what's wrong.
+    // (Database errors stay a generic 500 so SQL details are never sent to the browser.)
+    if (error?.name === "SequelizeValidationError") {
+      return res.status(400).json({
+        message: "Some details couldn't be saved: " + error.errors.map((e) => e.message).join("; "),
+      });
+    }
 
     res.status(500).json({
       message: "Failed to submit application",
