@@ -1520,8 +1520,15 @@ router.get("/registry", async (req, res) => {
         // FlexiPay" apart from "uploaded a receipt to verify manually"
         // at a glance, before opening the application.
         payment_mode:      payment
-          ? "ONLINE"
+          ? (String(payment.payment_method || payment.provider || "").toUpperCase() === "RECEIPT" ? "RECEIPT" : "ONLINE")
           : (raw.payment_receipt_path ? "RECEIPT" : null),
+        // Attached application-fee receipt, if any — opened in the receipt
+        // popup on the Pending Applications list.
+        payment_receipt_url: payment?.receipt_path
+          ? `https://helper.erb.go.ug/api/erb/receipt/uploads/${encodeURIComponent(payment.receipt_path)}`
+          : (raw.payment_receipt_path
+            ? `https://helper.erb.go.ug/api/erb/uploads/${encodeURIComponent(String(raw.payment_receipt_path).split("/").pop())}`
+            : null),
         amount:            payment?.amount ?? null,
         // Only meaningful for the ONLINE mode above (a real
         // PaymentTransaction row) — the applicant's own FlexiPay reference.
