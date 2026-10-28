@@ -13,6 +13,7 @@
 // renewal page) and to block paying twice for the same year.
 import { Op } from 'sequelize'
 import { PaymentTransaction } from '../controllers/receipt-controller.js'
+import { Application } from '../models/index.js'
 
 const DATA_API_BASE = 'https://data.erb.go.ug/api/engineers'
 // paid-records only supports a fuzzy ?search and a fixed page size of 10,
@@ -156,7 +157,55 @@ export async function findRenewalTransactions(regNo, years) {
   return byYear
 }
 
-// state: 'licensed' | 'paid' | 'pending_review' | 'rejected' | 'none'
+// ── Newly registered engineers ──────────────────────────────────────
+// An applicant whose licence number was issued through a portal
+// application this year has already paid for this year's licence as part
+// of registration (the registration fee covers the year of registration).
+// Their first renewal is for next year, and it only opens on 1 January.
+const NEW_REG_STATUSES = ['FINALIZING', 'REGISTERED']
+
+export async function findNewRegistration(regNo, { email } = {}) {
+  const target = compactReg(regNo)
+  if (!target) return null
+  const digits = regDigits(target)
+  const prefix = regPrefix(target)
+  // license_number is stored as "2296" or "TR 271" — try the usual spellings.
+  const ids = [...new Set([
+    String(regNo ?? '').trim(),
+    normReg(regNo),
+    target,
+    prefix && digits ? `${prefix} ${digits}` : null,
+  ].filter(Boolean))]
+
+  const rows = await Application.findAll({
+    where: { license_number: { [Op.in]: ids }, status: { [Op.in]: NEW_REG_STATUSES } },
+    order: [['id', 'DESC']],
+    limit: 5,
+  })
+  // Same number in two series is impossible, but if a stray row matches
+  // prefer the one whose email matches the engineer.
+  const mail = String(email || '').trim().toLowerCase()
+  const row = rows.find(r => mail && String(r.email_address || '').trim().toLowerCase() === mail) || rows[0]
+  if (!row) return null
+
+  const when = row.registered_at || row.license_issued_at || row.registration_fee_verified_at
+  if (!when) return null
+  return {
+    year: new Date(when).getFullYear(),
+    registered_at: when,
+    licence_no: row.license_number,
+    application_id: row.id,
+  }
+}
+
+// 1 January of `year`, as YYYY-MM-DD.
+const openingDay = (year) => `${year}-01-01`
+
+// state: 'licensed' | 'registered' | 'paid' | 'pending_review' | 'rejected' | 'not_open' | 'none'
+//   registered — licence issued through a new registration this year
+//                (registration covers this year; nothing to renew)
+//   not_open   — next year's renewal for a newly registered engineer;
+//                it opens on 1 January (opens_on)
 export async function getLicenceStatus(regNo, authHeader, { email } = {}) {
   const years = allowedRenewalYears()
   let paid = {}
@@ -168,11 +217,27 @@ export async function getLicenceStatus(regNo, authHeader, { email } = {}) {
   }
   const txs = await findRenewalTransactions(regNo, years)
 
+  let newReg = null
+  try {
+    const r = await findNewRegistration(regNo, { email })
+    if (r && r.year === years[0]) newReg = r
+  } catch (e) {
+    console.warn('[licence-status] new-registration lookup failed:', e.message)
+  }
+
   const result = {}
   for (const y of years) {
     const rec = paid[y]
     const tx  = txs[y]
-    if (rec) {
+    if (newReg && y === years[0] && !rec) {
+      result[y] = {
+        state: 'registered',
+        licence_no: `${normReg(newReg.licence_no)}/${y}`,
+        registered_at: newReg.registered_at,
+      }
+    } else if (newReg && y === years[1] && !rec && !tx) {
+      result[y] = { state: 'not_open', opens_on: openingDay(y) }
+    } else if (rec) {
       result[y] = {
         state: 'licensed',
         licence_no: rec.license_no || `${normReg(regNo)}/${y}`,
@@ -205,6 +270,8 @@ export async function getLicenceStatus(regNo, authHeader, { email } = {}) {
     // falls back to the profile.
     fee_category: feeCategoryFrom({ regNo, record: anyRecord }),
     paid_records_error: paidRecordsError,
+    // Set when the licence was issued through a new registration this year.
+    newly_registered: newReg ? { year: newReg.year, registered_at: newReg.registered_at } : null,
   }
 }
 
@@ -213,6 +280,8 @@ export async function renewalAlreadyCovered(regNo, year, authHeader, opts = {}) 
   const status = await getLicenceStatus(regNo, authHeader, opts)
   const s = status.years[year]?.state
   if (s === 'licensed') return `A licence for ${year} is already on record for ${status.reg_no}.`
+  if (s === 'registered') return `Your ${year} licence was covered by your registration — there's no ${year} renewal to pay.`
+  if (s === 'not_open') return `Your ${year} renewal opens on 1 January ${year}. There's nothing to pay yet.`
   if (s === 'paid') return `Your ${year} renewal has already been paid and approved.`
   if (s === 'pending_review') return `A ${year} renewal payment is already awaiting Accounts review.`
   return null
