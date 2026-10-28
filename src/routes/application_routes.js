@@ -461,6 +461,11 @@ async function lookupApplicantTin(raw) {
 // `!=` never matches NULL, hence the explicit IS NULL branch.
 const NOT_SOFT_DELETED = { [Op.or]: [{ status: null }, { status: { [Op.ne]: "DELETED" } }] };
 
+// Application-fee payments only. Registration-fee (and renewal) transactions
+// are stored under the same application_id, so without this the "latest
+// payment" used for the application fee could be the registration fee.
+const APPLICATION_FEE_PURPOSE = { [Op.or]: [{ purpose: "APPLICATION" }, { purpose: null }, { purpose: "" }] };
+
 // Same role list the receipt routes / TrackPayments.js treat as admin.
 const ADMIN_ROLES = ["REGISTRAR", "CHAIRMAN", "ACCOUNTS", "REGISTRATION"];
 
@@ -1133,7 +1138,7 @@ router.get("/application/:applicant_id", async (req, res) => {
     // were always blank there. Built from the latest PaymentTransaction,
     // or the receipt attached on the form, same rules as GET /:id.
     const latestPayment = await PaymentTransaction.findOne({
-      where: { application_id: String(raw.id), status: { [Op.notIn]: ["DELETED"] } },
+      where: { application_id: String(raw.id), status: { [Op.notIn]: ["DELETED"] }, ...APPLICATION_FEE_PURPOSE },
       order: [["updatedAt", "DESC"]],
     });
     const accountsConfirmedPaid = !!raw.accounts_verified_at;
@@ -1439,7 +1444,7 @@ router.get("/registry", async (req, res) => {
     // ── Payment lookup ─────────────────────────────────────────────
     const appIds = rows.map((r) => String(r.id));
     const payments = appIds.length
-      ? await PaymentTransaction.findAll({ where: { application_id: { [Op.in]: appIds }, status: { [Op.ne]: "DELETED" } } })
+      ? await PaymentTransaction.findAll({ where: { application_id: { [Op.in]: appIds }, status: { [Op.ne]: "DELETED" }, ...APPLICATION_FEE_PURPOSE } })
       : [];
 
     // Keep only the most recent transaction per application (an applicant
@@ -1721,7 +1726,7 @@ router.get("/:id/prior_payment", async (req, res) => {
     }
 
     const payment = await PaymentTransaction.findOne({
-      where: { application_id: String(raw.id), status: { [Op.ne]: "DELETED" } },
+      where: { application_id: String(raw.id), status: { [Op.ne]: "DELETED" }, ...APPLICATION_FEE_PURPOSE },
       order: [["updatedAt", "DESC"]],
     });
 
@@ -1817,7 +1822,7 @@ router.get("/:id", async (req, res) => {
     // why accounts_verified_at overrides whatever the underlying
     // PaymentTransaction (or lack of one) says.
     const latestPayment = await PaymentTransaction.findOne({
-      where: { application_id: String(raw.id), status: { [Op.ne]: "DELETED" } },
+      where: { application_id: String(raw.id), status: { [Op.ne]: "DELETED" }, ...APPLICATION_FEE_PURPOSE },
       order: [["updatedAt", "DESC"]],
     });
     const accountsConfirmedPaid = !!raw.accounts_verified_at;
