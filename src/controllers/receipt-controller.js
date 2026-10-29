@@ -745,6 +745,72 @@ export async function backfillPreviouslyVerifiedResubmissions() {
   return advanced
 }
 
+// ── Gateway-confirmed payment lookup ──────────────────────────────
+// The single source of truth for "this fee was paid online and the gateway
+// confirmed it" — only the payment watcher webhook stamps
+// gateway_confirmed_at, so a browser-declared or admin-set SUCCESS never
+// counts. Used to:
+//   • refuse a receipt upload for a fee that is already paid online
+//     (POST /application/engineer_documents "payment receipt",
+//      POST /receipt/registration-payment), and
+//   • tell the payment screens whether to hide "Attach receipt"
+//     (GET /receipt/payment-state).
+// purpose: 'APPLICATION' | 'REGISTRATION'. For REGISTRATION, older rows
+// stored the licence number / user id in application_id, so the applicant
+// is matched too.
+export async function findGatewayConfirmedPayment({ application_id, applicant_id, purpose = 'APPLICATION' }) {
+  const p = String(purpose || 'APPLICATION').toUpperCase()
+  const purposeWhere = p === 'APPLICATION'
+    ? { [Op.or]: [{ purpose: 'APPLICATION' }, { purpose: null }, { purpose: '' }] }
+    : { purpose: p }
+
+  const who = []
+  if (application_id != null && application_id !== '') who.push({ application_id: String(application_id) })
+  if (p === 'REGISTRATION' && applicant_id) who.push({ applicant_id: parseInt(applicant_id, 10) || -1 })
+  if (!who.length) return null
+
+  const rows = await PaymentTransaction.findAll({
+    where: {
+      [Op.and]: [
+        purposeWhere,
+        { [Op.or]: who },
+        { status: 'SUCCESS', gateway_confirmed_at: { [Op.ne]: null } },
+      ],
+    },
+    order: [['updatedAt', 'DESC']],
+  })
+  const hit = rows.map(r => r.toJSON()).find(isOnlineTx)
+  return hit || null
+}
+
+// Marks the post-approval registration fee as paid on the application once
+// the gateway confirms it. Accounts still verifies it (registration_fee/verify
+// issues the licence number) — this only stops the applicant being asked to
+// pay / attach a receipt again.
+async function markRegistrationFeePaid(tx) {
+  let application = null
+  if (/^\d+$/.test(String(tx.application_id || ''))) {
+    application = await Application.findByPk(tx.application_id)
+  }
+  if (!application && tx.applicant_id) {
+    application = await Application.findOne({
+      where: { applicant_id: tx.applicant_id, status: 'BOARD_APPROVED' },
+      order: [['updated_at', 'DESC']],
+    })
+  }
+  if (!application) return
+  const raw = application.toJSON()
+  if (String(raw.status || '').toUpperCase() !== 'BOARD_APPROVED') return
+  if (String(raw.registration_fee_status || '').toUpperCase() === 'VERIFIED') return
+  await application.update({
+    registration_fee_status:  'SUCCESS',
+    registration_fee_ref:     tx.transaction_ref,
+    registration_fee_paid_at: raw.registration_fee_paid_at || new Date(),
+    ...(tx.quoted_amount != null ? { registration_fee_amount: tx.quoted_amount } : {}),
+  })
+  console.log(`[registration-fee] Application ${raw.id} registration fee paid online (${tx.transaction_ref})`)
+}
+
 // Entry point for a gateway-CONFIRMED status change (payment webhook).
 export async function onConfirmedPaymentUpdate(record) {
   if (!record) return
@@ -781,6 +847,12 @@ export async function onConfirmedPaymentUpdate(record) {
   if (purpose === 'APPLICATION') {
     await autoAdvanceIfPaidOnline(tx.application_id).catch(err =>
       console.error(`[auto-verify] application ${tx.application_id} not advanced:`, err.message)
+    )
+  }
+
+  if (purpose === 'REGISTRATION') {
+    await markRegistrationFeePaid(tx).catch(err =>
+      console.error(`[registration-fee] ${tx.transaction_ref} not marked paid:`, err.message)
     )
   }
 }

@@ -10,7 +10,7 @@ import ApplicationModel from "../models/Application.js";
 import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
-import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, advanceIfPaymentAlreadyVerified } from "../controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, advanceIfPaymentAlreadyVerified, findGatewayConfirmedPayment } from "../controllers/receipt-controller.js";
 import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
@@ -531,6 +531,21 @@ router.post(
       if (!application) {
         fs.unlink(req.file.path, () => {});
         return res.status(404).json({ message: "Application not found" });
+      }
+
+      // ── Application fee already paid online? ────────────────────────
+      // A gateway-confirmed online payment is captured automatically, so a
+      // receipt for the same fee is refused (the wizard hides the option too).
+      if (column === "payment_receipt_path") {
+        const paidOnline = await findGatewayConfirmedPayment({ application_id: application.id, purpose: "APPLICATION" });
+        if (paidOnline) {
+          fs.unlink(req.file.path, () => {});
+          return res.status(409).json({
+            message: `Your application fee was already paid online (ref ${paidOnline.transaction_ref}) — no receipt is needed.`,
+            code: "PAID_ONLINE",
+            transaction_ref: paidOnline.transaction_ref,
+          });
+        }
       }
 
       // ── Normalize file path ─────────────────────────────────────────

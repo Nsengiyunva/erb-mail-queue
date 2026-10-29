@@ -9,7 +9,7 @@ import ReceiptModel  from '../models/Receipt.js'
 import { DataTypes, Op } from 'sequelize'
 import receiptQueue  from '../queues/receipt_queue.js'
 
-import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalApprovedReceipt, sendRenewalRejectedNotice, maybeSendReceiptEmail } from '../controllers/receipt-controller.js'
+import { saveTransaction, submitReceiptPayment, PaymentTransaction, sendRenewalApprovedReceipt, sendRenewalRejectedNotice, maybeSendReceiptEmail, findGatewayConfirmedPayment, normaliseStatus } from '../controllers/receipt-controller.js'
 import { parseReceiptWorkbook }        from '../utils/receipt-excel.js'
 import { generateEngineerReceiptPdf }  from '../utils/receipt-pdf.js'
 import { getLicenceStatus }            from '../utils/licence-status.js'
@@ -178,6 +178,20 @@ router.post('/registration-payment', upload.single('receipt'), async (req, res) 
       return res.status(409).json({ message: 'A registration fee payment is already recorded for this application.' })
     }
 
+    // Paid online and confirmed by the gateway → the payment is already
+    // captured; a receipt would only create a duplicate for Accounts.
+    const paidOnline = await findGatewayConfirmedPayment({
+      application_id: raw.id, applicant_id: raw.applicant_id, purpose: 'REGISTRATION',
+    })
+    if (paidOnline) {
+      cleanup()
+      return res.status(409).json({
+        message: `Your registration fee was already paid online (ref ${paidOnline.transaction_ref}) — no receipt is needed.`,
+        code: 'PAID_ONLINE',
+        transaction_ref: paidOnline.transaction_ref,
+      })
+    }
+
     const category = registrationCategoryFor(raw)
     const quoted   = QUOTED_FEES.REGISTRATION[category] ?? null
     const charged  = CHARGED_FEES.REGISTRATION[category] ?? null
@@ -222,6 +236,56 @@ router.post('/registration-payment', upload.single('receipt'), async (req, res) 
     cleanup()
     console.error('[registration-payment]', err.message)
     return res.status(500).json({ message: 'Failed to record registration fee payment' })
+  }
+})
+
+// ── GET /payment-state ────────────────────────────────────────────
+// What the payment screens (SectionF.js — application fee,
+// RegistrationInstantPayment.js — registration fee) need to decide whether
+// "Attach receipt" is allowed:
+//   ?ref=<transaction_ref>               → that transaction's live status
+//   ?application_id=<id>&purpose=<P>     → is this fee already paid online?
+// (both may be sent together). Response:
+//   { status: SUCCESS|FAILED|INITIATED|null, gateway_confirmed: bool,
+//     paid_online: bool, transaction_ref }
+// paid_online is true only for a SUCCESS the payment watcher reported
+// (gateway_confirmed_at) — that is when the receipt option is withdrawn.
+// The frontend polls this as a fallback to the payment:update socket event.
+router.get('/payment-state', async (req, res) => {
+  try {
+    const { ref, application_id, purpose } = req.query || {}
+    const applicantId = req.headers['x-applicant-id'] || req.query.applicant_id || null
+    if (!ref && !application_id) {
+      return res.status(400).json({ message: 'ref or application_id is required' })
+    }
+
+    let tx = null
+    if (ref) {
+      const row = await PaymentTransaction.findOne({ where: { transaction_ref: String(ref) } })
+      tx = row ? row.toJSON() : null
+    }
+
+    let confirmed = null
+    if (tx && normaliseStatus(tx.status) === 'SUCCESS' && tx.gateway_confirmed_at) {
+      confirmed = tx
+    } else if (application_id) {
+      confirmed = await findGatewayConfirmedPayment({
+        application_id, applicant_id: applicantId, purpose: purpose || tx?.purpose || 'APPLICATION',
+      })
+    }
+
+    const status = tx ? normaliseStatus(tx.status) : (confirmed ? 'SUCCESS' : null)
+    return res.json({
+      status,
+      gateway_confirmed: !!(tx?.gateway_confirmed_at),
+      paid_online:       !!confirmed,
+      transaction_ref:   confirmed?.transaction_ref || tx?.transaction_ref || null,
+      amount:            confirmed?.amount ?? tx?.amount ?? null,
+      paid_at:           confirmed ? (confirmed.gateway_confirmed_at || confirmed.updatedAt) : null,
+    })
+  } catch (err) {
+    console.error('[GET /payment-state]', err.message)
+    return res.status(500).json({ message: 'Failed to look up payment status' })
   }
 })
 
