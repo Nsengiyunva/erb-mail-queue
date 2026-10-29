@@ -1168,6 +1168,10 @@ router.get("/registry", async (req, res) => {
         license_number:    raw.license_number || null,
         registration_fee_status: raw.registration_fee_status || null,
         registration_payment:    summariseRegistrationPayment(regPaymentByApp[raw.id]),
+        // CORPORATE | TEMPORARY | TECHNOLOGIST | TECHNICIAN — same rule as the
+        // approval letter and the licence-number series. Drives the category
+        // sub-tabs on Pending Applications (Finalizing / Registered).
+        registration_category:   (() => { try { return registrationCategoryFor(raw); } catch { return null; } })(),
       };
     });
 
