@@ -61,12 +61,34 @@ function viewerOf(req) {
 
   const applicantId = parseInt(req.headers['x-applicant-id'], 10)
   const email = String(req.query.email || '').trim().toLowerCase()
-  if (!applicantId && !email) return null
+  // Registered engineers: their licence / registration number. Renewal and
+  // registration payments are keyed by it, and an engineer's account is not
+  // always the same user id (or email) they applied with.
+  const regNo = String(req.query.reg_no || '').trim().slice(0, 50)
+  if (!applicantId && !email && !regNo) return null
   return {
     admin:       false,
     applicantId: Number.isFinite(applicantId) && applicantId > 0 ? applicantId : null,
     email:       /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null,
+    regNo:       regNo || null,
+    appIds:      [],
   }
+}
+
+// The viewer's own licence applications — matched by user id, email or the
+// licence number they were issued. Lets an engineer whose account id/email
+// changed after registration still see their application-fee and
+// registration-fee receipts (those transactions point at the application).
+async function resolveViewerApplications(viewer) {
+  if (!viewer || viewer.admin) return viewer
+  const or = []
+  if (viewer.applicantId) or.push({ applicant_id: viewer.applicantId })
+  if (viewer.email)       or.push({ email_address: viewer.email })
+  if (viewer.regNo)       or.push({ license_number: viewer.regNo })
+  if (!or.length) return viewer
+  const apps = await Application.findAll({ where: { [Op.or]: or }, attributes: ['id'], limit: 50 })
+  viewer.appIds = apps.map(a => a.id)
+  return viewer
 }
 
 const like = (v) => ({ [Op.like]: `%${v}%` })
@@ -174,8 +196,10 @@ function txWhere({ viewer, purpose, status, search }) {
 
   if (!viewer.admin) {
     const who = []
-    if (viewer.applicantId) who.push({ applicant_id: viewer.applicantId })
-    if (viewer.email)       who.push({ email: viewer.email })
+    if (viewer.applicantId)   who.push({ applicant_id: viewer.applicantId })
+    if (viewer.email)         who.push({ email: viewer.email })
+    if (viewer.regNo)         who.push({ registration_number: viewer.regNo }, { application_id: viewer.regNo })
+    if (viewer.appIds.length) who.push({ application_id: { [Op.in]: viewer.appIds.map(String) } })
     if (!who.length) return null
     and.push({ [Op.or]: who })
   }
@@ -200,9 +224,8 @@ function appWhere({ viewer, purpose, status, search }) {
     { [Op.or]: [{ status: null }, { status: { [Op.ne]: 'DELETED' } }] },
   ]
   if (!viewer.admin) {
-    // Applications are always tied to the applicant's user id.
-    if (!viewer.applicantId) return null
-    and.push({ applicant_id: viewer.applicantId })
+    if (!viewer.appIds.length) return null
+    and.push({ id: { [Op.in]: viewer.appIds } })
   }
   if (search) {
     and.push({ [Op.or]: [
@@ -243,6 +266,7 @@ router.get('/', async (req, res) => {
   if (!viewer) return res.status(401).json({ message: 'Sign in to view receipts' })
 
   try {
+    await resolveViewerApplications(viewer)
     const page    = Math.max(1, parseInt(req.query.page, 10) || 1)
     const limit   = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(req.query.limit, 10) || 20))
     const purpose = String(req.query.purpose || '').toUpperCase() || null
@@ -328,7 +352,9 @@ async function findReceipt(kind, id, viewer) {
     if (!raw.receipt_email_status || raw.status === 'DELETED') return null
     if (!viewer.admin) {
       const mine = (viewer.applicantId && Number(raw.applicant_id) === viewer.applicantId) ||
-                   (viewer.email && String(raw.email || '').toLowerCase() === viewer.email)
+                   (viewer.email && String(raw.email || '').toLowerCase() === viewer.email) ||
+                   (viewer.regNo && [raw.registration_number, raw.application_id].map(String).includes(viewer.regNo)) ||
+                   viewer.appIds.map(String).includes(String(raw.application_id))
       if (!mine || raw.receipt_email_status === 'FAILED') return null
     }
     return { kind, model: t, raw }
@@ -340,7 +366,7 @@ async function findReceipt(kind, id, viewer) {
     const raw = a.toJSON()
     if (!raw.accounts_receipt_email_status) return null
     if (!viewer.admin) {
-      if (!viewer.applicantId || Number(raw.applicant_id) !== viewer.applicantId) return null
+      if (!viewer.appIds.map(String).includes(String(raw.id))) return null
       if (raw.accounts_receipt_email_status === 'FAILED') return null
     }
     return { kind, model: a, raw }
@@ -397,6 +423,7 @@ router.get('/:kind/:id/pdf', async (req, res) => {
   if (!viewer) return res.status(401).json({ message: 'Sign in to view receipts' })
 
   try {
+    await resolveViewerApplications(viewer)
     const found = await findReceipt(req.params.kind, req.params.id, viewer)
     if (!found) return res.status(404).json({ message: 'Receipt not found' })
 
@@ -453,5 +480,53 @@ router.post('/:kind/:id/resend', async (req, res) => {
     return res.status(500).json({ message: 'Could not resend this receipt' })
   }
 })
+
+// ── Startup backfill: receipts emailed before the status was recorded ──
+// Before receipt_email_status existed on payment_transactions (and before
+// accounts_receipt_email_status on erb_applications), receipts were
+// generated and emailed but never marked SENT — so they would never show up
+// on anyone's receipts page. The PDF is only written immediately before the
+// email is queued, so a PDF on disk for a transaction with no recorded
+// status means its receipt went out: mark those SENT. Idempotent, and only
+// ever touches rows whose status is still null.
+export async function backfillLegacySentReceipts() {
+  let files = []
+  try { files = fs.readdirSync(RECEIPT_PDF_DIR) } catch { return { tx: 0, app: 0 } }
+  const refs = new Set(
+    files.filter(f => /^receipt_.+\.pdf$/i.test(f)).map(f => f.replace(/^receipt_/i, '').replace(/\.pdf$/i, ''))
+  )
+  if (!refs.size) return { tx: 0, app: 0 }
+
+  const safe = (ref) => String(ref).replace(/[^a-zA-Z0-9_-]/g, '_')
+
+  const txs = await PaymentTransaction.findAll({
+    where: { receipt_email_status: null, status: { [Op.ne]: 'DELETED' } },
+    attributes: ['id', 'transaction_ref', 'updatedAt'],
+  })
+  const txIds = txs.filter(t => refs.has(safe(t.transaction_ref))).map(t => t.id)
+  if (txIds.length) {
+    await PaymentTransaction.update(
+      { receipt_email_status: 'SENT' },
+      { where: { id: { [Op.in]: txIds } }, silent: true } // keep updatedAt (used as the sent date)
+    )
+  }
+
+  const appIds = [...refs]
+    .map(r => /^ERB-(\d+)-ACCTVERIFIED$/.exec(r)?.[1])
+    .filter(Boolean)
+  let appCount = 0
+  if (appIds.length) {
+    const [n] = await Application.update(
+      { accounts_receipt_email_status: 'SENT' },
+      { where: { id: { [Op.in]: appIds }, accounts_receipt_email_status: null }, silent: true }
+    )
+    appCount = n
+  }
+
+  if (txIds.length || appCount) {
+    console.log(`[sent-receipts] backfill: marked ${txIds.length} payment receipt(s) and ${appCount} application receipt(s) as sent (PDF on file, status never recorded)`)
+  }
+  return { tx: txIds.length, app: appCount }
+}
 
 export default router
