@@ -446,43 +446,140 @@ function requireAdmin(req, res) {
   return viewer
 }
 
-// GET /lookup?q=  — applications matching an id, name, email or licence no.
+// ── Lookup: engineers database + applications ──────────────────────
+// GET /lookup?q=  — searches the engineers database (data.erb.go.ug, the
+// same source as the portal's "Engineers Database" page; the admin's
+// Authorization header is forwarded) and licence applications, and returns
+// each person with their details and the fee for every receipt type.
+// Engineers come first; an application belonging to a listed engineer
+// (licence number = reg no.) is folded into that engineer's row.
+// If the engineers database can't be reached, applications are still
+// returned with `engineers_error` set, so the form keeps working.
+const ENGINEERS_API = process.env.ERB_ENGINEERS_API || 'https://data.erb.go.ug/api/engineers'
+const firstOf = (list) => String(list || '').split(/[;,]/).map(x => x.trim()).find(Boolean) || null
+const feesFor = (category) => Object.fromEntries(CREATE_PURPOSES.map(p => [p, resolveQuotedFee(p, category)]))
+const normReg = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+
+// Fee category from an engineer's register type (PERMANENT → Engineer).
+function categoryFromType(type) {
+  const t = String(type || '').toUpperCase()
+  if (t.startsWith('TEMP'))     return 'Temporary'
+  if (t.startsWith('TECHNOLO')) return 'Technologist'
+  if (t.startsWith('TECHNICI')) return 'Technician'
+  if (!t) return null
+  return 'Permanent'
+}
+
+async function searchEngineers(q, authorization) {
+  const url = `${ENGINEERS_API}?${new URLSearchParams({ search: q, page: '1', limit: '8', licence_year: String(new Date().getFullYear()) })}`
+  const res = await fetch(url, {
+    headers: authorization ? { Authorization: authorization } : {},
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!res.ok) throw new Error(res.status === 401 || res.status === 403 ? 'not signed in to the engineers database' : `engineers database returned ${res.status}`)
+  const body = await res.json()
+  return (body?.data || []).map(e => {
+    const type = e.type || e.effective_type || null
+    const category = categoryFromType(type)
+    return {
+      source:              'ENGINEER',
+      key:                 `eng-${e.id ?? e.reg_no}`,
+      engineer_id:         e.id ?? null,
+      application_id:      null,
+      applicant_id:        e.account?.id ?? e.user_id ?? null,
+      name:                e.name || null,
+      email:               e.primary_email || firstOf(e.emails) || e.account?.email || null,
+      phone:               e.primary_contact || firstOf(e.phones) || null,
+      registration_number: e.reg_no || null,
+      license_number:      e.reg_no || null,
+      type,
+      category,
+      field:               e.field || null,
+      organisation:        e.organisation || null,
+      licence:             e.licence ? { year: e.licence.year, has_licence: !!e.licence.has_licence, renewal_status: e.licence.renewal_status || null } : null,
+      status:              null,
+      fees:                feesFor(category),
+    }
+  })
+}
+
+async function searchApplications(q) {
+  const or = [
+    { first_name: like(q) }, { surname: like(q) }, { other_names: like(q) },
+    { email_address: like(q) }, { license_number: like(q) }, { telephone: like(q) },
+  ]
+  const asId = q.replace(/^ERB-?0*/i, '')
+  if (/^\d+$/.test(asId)) or.push({ id: Number(asId) })
+  const apps = await Application.findAll({
+    where: { [Op.and]: [{ [Op.or]: or }, { [Op.or]: [{ status: null }, { status: { [Op.ne]: 'DELETED' } }] }] },
+    order: [['updated_at', 'DESC']],
+    limit: 10,
+  })
+  return apps.map(a => a.toJSON()).map(a => {
+    const category = a.category || a.profession || null
+    return {
+      source:              'APPLICATION',
+      key:                 `app-${a.id}`,
+      engineer_id:         null,
+      application_id:      a.id,
+      applicant_id:        a.applicant_id,
+      name:                formatApplicantName(a),
+      email:               a.email_address || null,
+      phone:               a.telephone || a.registered_phone_number || null,
+      registration_number: a.license_number || null,
+      license_number:      a.license_number || null,
+      type:                null,
+      category,
+      field:               null,
+      organisation:        null,
+      licence:             null,
+      status:              a.status || null,
+      fees:                feesFor(category),
+    }
+  })
+}
+
 router.get('/lookup', async (req, res) => {
   if (!requireAdmin(req, res)) return
   const q = String(req.query.q || '').trim().slice(0, 100)
   if (q.length < 2) return res.json({ results: [] })
   try {
-    const or = [
-      { first_name: like(q) }, { surname: like(q) }, { other_names: like(q) },
-      { email_address: like(q) }, { license_number: like(q) }, { telephone: like(q) },
-    ]
-    const asId = q.replace(/^ERB-?0*/i, '')
-    if (/^\d+$/.test(asId)) or.push({ id: Number(asId) })
-    const apps = await Application.findAll({
-      where: { [Op.and]: [{ [Op.or]: or }, { [Op.or]: [{ status: null }, { status: { [Op.ne]: 'DELETED' } }] }] },
-      order: [['updated_at', 'DESC']],
-      limit: 10,
-    })
+    const [eng, apps] = await Promise.allSettled([searchEngineers(q, req.headers.authorization), searchApplications(q)])
+    const engineers    = eng.status === 'fulfilled' ? eng.value : []
+    const applications = apps.status === 'fulfilled' ? apps.value : []
+    if (apps.status === 'rejected') console.error('[GET /receipt/sent/lookup] applications:', apps.reason?.message)
+
+    // Fold an engineer's own application into their row (gives the receipt
+    // an application number and links it to their portal account).
+    const byReg = new Map(engineers.filter(e => e.registration_number).map(e => [normReg(e.registration_number), e]))
+    const rest = []
+    for (const a of applications) {
+      const e = a.license_number && byReg.get(normReg(a.license_number))
+      if (e) {
+        e.application_id = e.application_id || a.application_id
+        e.applicant_id   = e.applicant_id || a.applicant_id
+        e.email          = e.email || a.email
+        e.phone          = e.phone || a.phone
+        if (!e.category) { e.category = a.category; e.fees = a.fees }
+      } else rest.push(a)
+    }
+
     return res.json({
-      results: apps.map(a => a.toJSON()).map(a => {
-        const category = a.category || a.profession || null
-        return {
-          application_id: a.id,
-          applicant_id:   a.applicant_id,
-          name:           formatApplicantName(a),
-          email:          a.email_address || null,
-          phone:          a.telephone || a.registered_phone_number || null,
-          category,
-          license_number: a.license_number || null,
-          status:         a.status || null,
-          fees: Object.fromEntries(CREATE_PURPOSES.map(p => [p, resolveQuotedFee(p, category)])),
-        }
-      }),
+      results: [...engineers, ...rest].slice(0, 15),
+      ...(eng.status === 'rejected' ? { engineers_error: `Engineers database not searched (${eng.reason?.message || 'unavailable'}) — showing applications only.` } : {}),
     })
   } catch (err) {
     console.error('[GET /receipt/sent/lookup]', err.message)
     return res.status(500).json({ message: 'Lookup failed' })
   }
+})
+
+// GET /fees — the fee schedule, so the form can suggest the amount for
+// details typed in by hand (category + receipt type).
+router.get('/fees', (req, res) => {
+  if (!requireAdmin(req, res)) return
+  const categories = ['Permanent', 'Temporary', 'Technologist', 'Technician']
+  return res.json({ fees: Object.fromEntries(categories.map(c => [c, feesFor(c)])) })
 })
 
 // Validates the form and builds the PaymentTransaction fields.
@@ -539,7 +636,7 @@ async function buildManualReceipt(body, viewer, { preview = false } = {}) {
     payment_method:      'RECEIPT',
     amount,
     quoted_amount:       amount,
-    fee_category:        app?.category || app?.profession || body.category || null,
+    fee_category:        String(body.category || '').trim() || app?.category || app?.profession || null,
     applicant_name:      applicantName,
     applicant_id:        app?.applicant_id ?? (parseInt(body.applicant_id, 10) || null),
     status:              'SUCCESS',
