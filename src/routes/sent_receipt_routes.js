@@ -38,7 +38,8 @@ import ReceiptModel    from '../models/Receipt.js'
 import { Application } from '../models/index.js'
 import receiptQueue    from '../queues/receipt_queue.js'
 import { formatApplicantName } from '../utils/applicant-name.js'
-import { generateReceiptPdf, RECEIPT_PDF_DIR } from '../utils/receipt-pdf.js'
+import { generateReceiptPdf, RECEIPT_PDF_DIR, PAID_VIA_LABEL, receiptPdfPathFor } from '../utils/receipt-pdf.js'
+import { resolveQuotedFee } from '../utils/fee-schedule.js'
 import {
   PaymentTransaction,
   maybeSendReceiptEmail,
@@ -51,7 +52,9 @@ const router  = express.Router()
 const Receipt = sequelize.models.Receipt || ReceiptModel(sequelize, DataTypes)
 
 const ADMIN_ROLES = ['REGISTRAR', 'CHAIRMAN', 'ACCOUNTS', 'REGISTRATION', 'ADMINISTRATION']
-const EMAIL_STATUSES = ['SENT', 'QUEUED', 'FAILED']
+// ISSUED = created by staff without emailing it (still visible/downloadable).
+const EMAIL_STATUSES = ['SENT', 'QUEUED', 'FAILED', 'ISSUED']
+const VISIBLE_TO_APPLICANT = ['SENT', 'QUEUED', 'ISSUED']
 const MAX_PAGE_SIZE  = 100
 
 // ── Who is asking ─────────────────────────────────────────────────
@@ -129,7 +132,10 @@ function txRow(t) {
     provider:        t.provider || null,
     renewal_year:    t.renewal_year || null,
     email_status:    normStatus(t.receipt_email_status),
-    paid_at:         t.gateway_confirmed_at || t.createdAt || null,
+    source:          t.source || 'SYSTEM',
+    paid_via:        t.paid_via || null,
+    issued_by:       t.issued_by || null,
+    paid_at:         t.paid_on || t.gateway_confirmed_at || t.createdAt || null,
     sent_at:         t.receipt_sent_at || t.updatedAt || null,
   }
 }
@@ -187,7 +193,7 @@ function txWhere({ viewer, purpose, status, search }) {
   const and = [{ status: { [Op.ne]: 'DELETED' } }]
 
   // Applicants only see receipts that actually went (or are going) out.
-  const statuses = viewer.admin ? EMAIL_STATUSES : ['SENT', 'QUEUED']
+  const statuses = viewer.admin ? EMAIL_STATUSES : VISIBLE_TO_APPLICANT
   if (status && !statuses.includes(status)) return null
   and.push({ receipt_email_status: status ? status : { [Op.in]: statuses } })
 
@@ -216,7 +222,7 @@ function txWhere({ viewer, purpose, status, search }) {
 
 function appWhere({ viewer, purpose, status, search }) {
   if (purpose && purpose !== 'APPLICATION') return null
-  const statuses = viewer.admin ? EMAIL_STATUSES : ['SENT', 'QUEUED']
+  const statuses = viewer.admin ? EMAIL_STATUSES : VISIBLE_TO_APPLICANT
   if (status && !statuses.includes(status)) return null
 
   const and = [
@@ -386,8 +392,9 @@ async function findReceipt(kind, id, viewer) {
   return null
 }
 
-const pdfPathForRef = (ref) =>
-  path.join(RECEIPT_PDF_DIR, `receipt_${String(ref).replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`)
+// Standard-layout file for a reference (older, pre-standard PDFs named
+// receipt_<ref>.pdf are ignored here, so they get redrawn in the standard layout).
+const pdfPathForRef = (ref) => receiptPdfPathFor(ref)
 
 // Returns a path to the PDF on disk, regenerating system receipts if the
 // original file was cleaned up. Uploaded files (kind "file") can't be rebuilt.
@@ -414,6 +421,226 @@ async function ensurePdf(found) {
 
   return null
 }
+
+// ══════════════════════════════════════════════════════════════════
+// Staff: create a receipt manually
+// ══════════════════════════════════════════════════════════════════
+// For payments received outside the portal (bank deposit, cash, cheque,
+// a mobile-money payment the watcher never saw, …). The receipt is stored
+// as a receipt payment in payment_transactions — provider/payment_method
+// 'RECEIPT', source 'ADMIN' — so the Payment Tracker counts it under
+// "Collected via Receipt", the engineer sees it on their receipts page, and
+// a RENEWAL is recorded as APPROVED for its year (licence-status.js).
+//
+//   GET  /lookup?q=…   find an application / engineer to fill the form
+//   POST /preview      the PDF as it will look (nothing saved)
+//   POST /create       save it, generate the PDF, optionally email it
+
+const CREATE_PURPOSES = ['APPLICATION', 'REGISTRATION', 'RENEWAL']
+const PAID_VIA = Object.keys(PAID_VIA_LABEL)
+const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim())
+
+function requireAdmin(req, res) {
+  const viewer = viewerOf(req)
+  if (!viewer?.admin) { res.status(403).json({ message: 'Only ERB staff can create receipts' }); return null }
+  return viewer
+}
+
+// GET /lookup?q=  — applications matching an id, name, email or licence no.
+router.get('/lookup', async (req, res) => {
+  if (!requireAdmin(req, res)) return
+  const q = String(req.query.q || '').trim().slice(0, 100)
+  if (q.length < 2) return res.json({ results: [] })
+  try {
+    const or = [
+      { first_name: like(q) }, { surname: like(q) }, { other_names: like(q) },
+      { email_address: like(q) }, { license_number: like(q) }, { telephone: like(q) },
+    ]
+    const asId = q.replace(/^ERB-?0*/i, '')
+    if (/^\d+$/.test(asId)) or.push({ id: Number(asId) })
+    const apps = await Application.findAll({
+      where: { [Op.and]: [{ [Op.or]: or }, { [Op.or]: [{ status: null }, { status: { [Op.ne]: 'DELETED' } }] }] },
+      order: [['updated_at', 'DESC']],
+      limit: 10,
+    })
+    return res.json({
+      results: apps.map(a => a.toJSON()).map(a => {
+        const category = a.category || a.profession || null
+        return {
+          application_id: a.id,
+          applicant_id:   a.applicant_id,
+          name:           formatApplicantName(a),
+          email:          a.email_address || null,
+          phone:          a.telephone || a.registered_phone_number || null,
+          category,
+          license_number: a.license_number || null,
+          status:         a.status || null,
+          fees: Object.fromEntries(CREATE_PURPOSES.map(p => [p, resolveQuotedFee(p, category)])),
+        }
+      }),
+    })
+  } catch (err) {
+    console.error('[GET /receipt/sent/lookup]', err.message)
+    return res.status(500).json({ message: 'Lookup failed' })
+  }
+})
+
+// Validates the form and builds the PaymentTransaction fields.
+async function buildManualReceipt(body, viewer, { preview = false } = {}) {
+  const errors = {}
+  const purpose = String(body.purpose || '').toUpperCase()
+  if (!CREATE_PURPOSES.includes(purpose)) errors.purpose = 'Choose application, registration or renewal'
+
+  let application = null
+  if (body.application_id != null && String(body.application_id).trim() !== '') {
+    if (!/^\d+$/.test(String(body.application_id).trim())) errors.application_id = 'Application ID must be a number'
+    else {
+      application = await Application.findByPk(String(body.application_id).trim())
+      if (!application) errors.application_id = `No application with ID ${body.application_id}`
+    }
+  }
+  const app = application?.toJSON() || null
+
+  const applicantName = String(body.applicant_name || '').trim() || (app ? formatApplicantName(app) : '')
+  const email         = String(body.email || '').trim() || app?.email_address || ''
+  const regNo         = String(body.registration_number || '').trim() || app?.license_number || ''
+  const amount        = Number(String(body.amount ?? '').replace(/[,\s]/g, ''))
+  const paidVia       = String(body.paid_via || '').toUpperCase()
+  const paidOn        = body.paid_on ? new Date(body.paid_on) : new Date()
+  const renewalYear   = parseInt(body.renewal_year, 10)
+  const ref           = String(body.payment_reference || '').trim()
+
+  if (!applicantName) errors.applicant_name = 'Enter the payer’s name'
+  if (!isEmail(email)) errors.email = 'Enter a valid email address — receipts are matched to engineers by it'
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isInteger(amount)) errors.amount = 'Enter the amount paid in whole UGX'
+  if (!PAID_VIA.includes(paidVia)) errors.paid_via = 'Choose how it was paid'
+  if (isNaN(paidOn) || paidOn > new Date(Date.now() + 86400000)) errors.paid_on = 'Enter a valid payment date (not in the future)'
+  if (purpose === 'RENEWAL') {
+    if (!regNo) errors.registration_number = 'Renewals need the engineer’s registration / licence number'
+    const maxY = new Date().getFullYear() + 1
+    if (!Number.isInteger(renewalYear) || renewalYear < 2000 || renewalYear > maxY) errors.renewal_year = `Enter the licence year being renewed (2000–${maxY})`
+  } else if (!app && !regNo) {
+    errors.application_id = 'Pick the application (or enter a registration number)'
+  }
+  if (ref && !/^[A-Za-z0-9 _./-]{3,90}$/.test(ref)) errors.payment_reference = 'Use letters, numbers, spaces and - _ . / only'
+  if (ref && !preview) {
+    const taken = await PaymentTransaction.findOne({ where: { transaction_ref: ref } })
+    if (taken) errors.payment_reference = `Reference ${ref} is already used (${taken.purpose || 'payment'} for ${taken.applicant_name || taken.application_id})`
+  }
+
+  const transactionRef = ref ||
+    `ERB-${purpose.slice(0, 3)}-${(app?.id || regNo || 'X').toString().replace(/[^A-Za-z0-9]/g, '')}-${Date.now().toString(36).toUpperCase()}`
+
+  const fields = {
+    application_id:      String(app?.id || regNo),
+    transaction_ref:     transactionRef,
+    phone:               String(body.phone || '').trim() || app?.telephone || null,
+    provider:            'RECEIPT',
+    payment_method:      'RECEIPT',
+    amount,
+    quoted_amount:       amount,
+    fee_category:        app?.category || app?.profession || body.category || null,
+    applicant_name:      applicantName,
+    applicant_id:        app?.applicant_id ?? (parseInt(body.applicant_id, 10) || null),
+    status:              'SUCCESS',
+    purpose,
+    registration_number: purpose === 'RENEWAL' ? regNo : (regNo || String(app?.id || '')),
+    email:               email.toLowerCase(),
+    renewal_year:        purpose === 'RENEWAL' ? renewalYear : null,
+    renewal_status:      purpose === 'RENEWAL' ? 'APPROVED' : null,
+    renewal_reviewed_by: purpose === 'RENEWAL' ? (viewer.name || 'Accounts') : null,
+    renewal_reviewed_at: purpose === 'RENEWAL' ? new Date() : null,
+    renewal_review_comment: purpose === 'RENEWAL' ? 'Receipt issued manually from Sent Receipts.' : null,
+    source:              'ADMIN',
+    paid_via:            paidVia,
+    paid_on:             isNaN(paidOn) ? new Date() : paidOn,
+    issued_by:           viewer.name || null,
+    issue_notes:         String(body.notes || '').trim().slice(0, 1000) || null,
+  }
+  return { errors, fields, application: app }
+}
+
+// Warn before issuing a second receipt for the same fee.
+async function findDuplicateReceipt(fields) {
+  const where = {
+    purpose: fields.purpose,
+    status: { [Op.ne]: 'DELETED' },
+    receipt_email_status: { [Op.ne]: null },
+    [Op.or]: [
+      { application_id: fields.application_id },
+      ...(fields.registration_number ? [{ registration_number: fields.registration_number }] : []),
+    ],
+  }
+  if (fields.purpose === 'RENEWAL') where.renewal_year = fields.renewal_year
+  const dup = await PaymentTransaction.findOne({ where, order: [['updatedAt', 'DESC']] })
+  return dup ? dup.toJSON() : null
+}
+
+const adminName = (req) => String(req.body?.issued_by || '').trim().slice(0, 200) || null
+
+// POST /preview — renders the PDF for the form as entered; nothing saved.
+router.post('/preview', async (req, res) => {
+  const viewer = requireAdmin(req, res); if (!viewer) return
+  viewer.name = adminName(req)
+  try {
+    const { errors, fields } = await buildManualReceipt(req.body || {}, viewer, { preview: true })
+    if (Object.keys(errors).length) return res.status(422).json({ message: 'Please fix the highlighted fields', errors })
+    const filePath = await generateReceiptPdf(fields, { preview: true })
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', 'inline; filename="receipt-preview.pdf"')
+    return res.sendFile(path.resolve(filePath), () => fs.unlink(filePath, () => {}))
+  } catch (err) {
+    console.error('[POST /receipt/sent/preview]', err.message)
+    return res.status(500).json({ message: 'Could not build the preview' })
+  }
+})
+
+// POST /create — body: purpose, application_id | registration_number,
+// applicant_name, email, phone, amount, paid_via, paid_on, payment_reference,
+// renewal_year (RENEWAL), notes, send_email (default true), issued_by,
+// confirm_duplicate (true to issue despite an existing receipt).
+router.post('/create', async (req, res) => {
+  const viewer = requireAdmin(req, res); if (!viewer) return
+  viewer.name = adminName(req)
+  try {
+    const body = req.body || {}
+    const { errors, fields } = await buildManualReceipt(body, viewer)
+    if (Object.keys(errors).length) return res.status(422).json({ message: 'Please fix the highlighted fields', errors })
+
+    if (!body.confirm_duplicate) {
+      const dup = await findDuplicateReceipt(fields)
+      if (dup) {
+        return res.status(409).json({
+          code: 'DUPLICATE',
+          message: `A ${fields.purpose.toLowerCase()} receipt${fields.purpose === 'RENEWAL' ? ` for ${fields.renewal_year}` : ''} already exists for ${dup.applicant_name || fields.applicant_name} (ref ${dup.transaction_ref}).`,
+          existing: { id: dup.id, transaction_ref: dup.transaction_ref, amount: dup.quoted_amount ?? dup.amount, sent_at: dup.receipt_sent_at || dup.updatedAt },
+        })
+      }
+    }
+
+    const sendEmail = body.send_email !== false && body.send_email !== 'false'
+    const record = await PaymentTransaction.create(fields)
+    const tx = record.toJSON()
+
+    if (sendEmail) {
+      // Same pipeline as every other receipt: PDF → paymentReceiptQueue → email.
+      await maybeSendReceiptEmail(tx, { email: tx.email })
+    } else {
+      await generateReceiptPdf({ ...tx, amount: tx.quoted_amount })
+      await PaymentTransaction.update({ receipt_email_status: 'ISSUED' }, { where: { id: tx.id } })
+    }
+
+    const fresh = (await PaymentTransaction.findByPk(tx.id)).toJSON()
+    console.log(`[sent-receipts] ${fresh.purpose} receipt ${fresh.transaction_ref} issued manually by ${fresh.issued_by || 'staff'} (${sendEmail ? 'emailed' : 'not emailed'})`)
+    return res.status(201).json({
+      message: sendEmail ? `Receipt created and emailed to ${fresh.email}` : 'Receipt created (not emailed)',
+      receipt: txRow(fresh),
+    })
+  } catch (err) {
+    console.error('[POST /receipt/sent/create]', err.message)
+    return res.status(500).json({ message: 'Could not create the receipt' })
+  }
+})
 
 // ── GET /:kind/:id/pdf ────────────────────────────────────────────
 // Headers as for the list. ?download=1 forces a download instead of
@@ -493,7 +720,8 @@ export async function backfillLegacySentReceipts() {
   let files = []
   try { files = fs.readdirSync(RECEIPT_PDF_DIR) } catch { return { tx: 0, app: 0 } }
   const refs = new Set(
-    files.filter(f => /^receipt_.+\.pdf$/i.test(f)).map(f => f.replace(/^receipt_/i, '').replace(/\.pdf$/i, ''))
+    // old layout: receipt_<ref>.pdf · standard layout: erb-receipt_<ref>.pdf
+    files.filter(f => /^(erb-)?receipt_.+\.pdf$/i.test(f)).map(f => f.replace(/^(erb-)?receipt_/i, '').replace(/\.pdf$/i, ''))
   )
   if (!refs.size) return { tx: 0, app: 0 }
 

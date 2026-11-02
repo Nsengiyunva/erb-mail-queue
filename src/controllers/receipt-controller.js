@@ -90,6 +90,15 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   // Shown on the "My Receipts" / "Sent Receipts" pages. Null on rows sent
   // before this column existed — those fall back to updatedAt.
   receipt_sent_at:      { type: DataTypes.DATE },
+  // ── Added for receipts issued manually by staff (Sent Receipts →
+  // "Create receipt"). Such rows are stored as receipt payments
+  // (provider/payment_method 'RECEIPT') so every existing flow treats them
+  // like an Accounts-verified attached receipt; these record the detail.
+  source:      { type: DataTypes.STRING(20) },   // null (system) | 'ADMIN'
+  paid_via:    { type: DataTypes.STRING(20) },   // BANK | MOBILE | CASH | CHEQUE | EFT | OTHER
+  paid_on:     { type: DataTypes.DATE },         // when the money was received (printed on the receipt)
+  issued_by:   { type: DataTypes.STRING(200) },
+  issue_notes: { type: DataTypes.TEXT },
 }, {
   tableName:   'payment_transactions',
   timestamps:  true,
@@ -228,6 +237,7 @@ export async function maybeSendReceiptEmail(record, { email } = {}) {
       ...tx,
       amount:  quotedAmount,
       purpose: tx.purpose || 'APPLICATION',
+      email:   resolvedEmail,
     })
 
 
@@ -272,6 +282,10 @@ export function accountsVerificationReceiptTx(raw) {
     purpose:         'APPLICATION',
     payment_method:  'RECEIPT',
     status:          'SUCCESS',
+    fee_category:    raw.category || raw.profession || null,
+    email:           raw.email_address || null,
+    issued_by:       raw.accounts_verified_by || 'ERB Accounts',
+    paid_on:         raw.created_at || null,
     updatedAt:       raw.accounts_verified_at || new Date(),
   }
 }

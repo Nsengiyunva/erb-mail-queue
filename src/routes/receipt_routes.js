@@ -829,6 +829,36 @@ async function generateAndQueueReceipt(engineerRecord) {
   return { receiptId: receipt.id }
 }
 
+// ── POST /render ───────────────────────────────────────────────────
+// Draws an annual-licence or WED receipt in the ERB standard layout
+// (utils/standard-receipt.js) and returns the PDF. Used by the portal
+// wherever it used to draw these receipts in the browser — previews and
+// the "send receipt" flows, which then upload this PDF via /upload-receipt
+// or /upload-wed-receipt exactly as before.
+//   body: { record: { id, name, reg_no, license_no, specialization,
+//                     email_address, purpose, amount_paid, year_paid },
+//           kind: 'LICENCE' | 'WED',
+//           issue: true  → numbered receipt (being sent to the engineer)
+//                  false → unnumbered PREVIEW }
+router.post('/render', express.json({ limit: '1mb' }), async (req, res) => {
+  const { record, kind = 'LICENCE', issue = false } = req.body || {}
+  if (!record || typeof record !== 'object') return res.status(400).json({ message: 'record is required' })
+  if (record.amount_paid == null || isNaN(Number(record.amount_paid))) {
+    return res.status(422).json({ message: 'The record has no valid amount_paid' })
+  }
+  try {
+    const filePath = await generateEngineerReceiptPdf(record, { kind, preview: !issue })
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="ERB-Receipt-${String(record.reg_no || 'preview').replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf"`)
+    // The portal uploads its own copy when it sends the receipt, so this
+    // rendered file is temporary either way.
+    return res.sendFile(path.resolve(filePath), () => fs.unlink(filePath, () => {}))
+  } catch (err) {
+    console.error('[POST /receipt/render]', err.message)
+    return res.status(500).json({ message: 'Could not draw the receipt' })
+  }
+})
+
 router.options('/bulk-upload', cors(corsOptions), (_req, res) => res.sendStatus(204))
 
 router.post('/bulk-upload', upload_excel.single('file'), async (req, res) => {
