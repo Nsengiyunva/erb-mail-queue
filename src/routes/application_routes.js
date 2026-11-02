@@ -10,7 +10,7 @@ import ApplicationModel from "../models/Application.js";
 import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
-import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, advanceIfPaymentAlreadyVerified, findGatewayConfirmedPayment } from "../controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, sendRegistrationFeeReceipt, advanceIfPaymentAlreadyVerified, findGatewayConfirmedPayment } from "../controllers/receipt-controller.js";
 import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { computeApplicationProgress } from "../utils/application-progress.js";
@@ -1938,6 +1938,12 @@ async function verifyRegistrationFee(applicationID, { verified_by, comment }) {
     author_role: "ACCOUNTS",
   });
   if (issued.skipped?.length) console.log(`[registration-fee] ${trackingNumber(application.id)}: skipped numbers already in use → ${issued.skipped.join(", ")}`);
+
+  // Email the applicant their registration-fee receipt (best-effort; shows
+  // up on their "My Receipts" page once sent).
+  Application.findByPk(application.id)
+    .then(fresh => sendRegistrationFeeReceipt(fresh))
+    .catch(err => console.error(`[registration-fee] receipt for application ${application.id} failed:`, err.message));
 
   return { application_status: "FINALIZING", license_number: issued.licenceNo, category, registration_type: registrationTypeFor(category) };
 }

@@ -90,7 +90,7 @@ const worker = new Worker(
         );
       } else {
         await PaymentTransaction.update(
-          { receipt_email_status: "SENT" },
+          { receipt_email_status: "SENT", receipt_sent_at: new Date() },
           { where: { transaction_ref: transactionRef } }
         );
       }

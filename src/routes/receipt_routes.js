@@ -16,6 +16,7 @@ import { getLicenceStatus }            from '../utils/licence-status.js'
 import { erbFeeFor, resolveQuotedFee, QUOTED_FEES, CHARGED_FEES } from '../utils/fee-schedule.js'
 import { registrationCategoryFor } from '../utils/approval-letter.js'
 import { Application }                 from '../models/index.js'
+import sentReceiptRoutes               from './sent_receipt_routes.js'
 
 const router  = express.Router()
 const Receipt = ReceiptModel(sequelize, DataTypes)
@@ -136,6 +137,12 @@ router.post('/upload-wed-receipt', upload_receipt.single('file'), async (req, re
     res.status(500).json({ message: 'Failed to upload receipt' })
   }
 })
+
+// ── Sent receipts (applicant "My Receipts" + admin "Sent Receipts") ──
+// List / download / resend every receipt the system has emailed —
+// application, registration, renewal, annual licence and WED. See
+// routes/sent_receipt_routes.js.
+router.use('/sent', sentReceiptRoutes)
 
 router.post('/save-transaction', saveTransaction)
 

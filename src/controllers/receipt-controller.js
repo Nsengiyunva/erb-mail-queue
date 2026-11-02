@@ -86,6 +86,10 @@ export const PaymentTransaction = sequelize.define('PaymentTransaction', {
   // was silently a no-op because Sequelize doesn't write unknown
   // attributes, which is why receipts were never actually confirmed sent.
   receipt_email_status: { type: DataTypes.STRING(20) },  // null | 'QUEUED' | 'SENT' | 'FAILED'
+  // When the receipt email actually went out (set by payment_receipt_worker.js).
+  // Shown on the "My Receipts" / "Sent Receipts" pages. Null on rows sent
+  // before this column existed — those fall back to updatedAt.
+  receipt_sent_at:      { type: DataTypes.DATE },
 }, {
   tableName:   'payment_transactions',
   timestamps:  true,
@@ -152,7 +156,7 @@ async function resolveApplicantEmail({ email, application_id, applicant_id }) {
 //   3. tx.amount itself, as an absolute last resort, so a receipt is
 //      never blocked entirely on this — just not as accurate as it
 //      should be, which is logged so it's visible in practice.
-async function resolveQuotedAmount(tx) {
+export async function resolveQuotedAmount(tx) {
   if (tx.quoted_amount != null) return tx.quoted_amount
 
   let category = tx.fee_category || null
@@ -249,6 +253,29 @@ export async function maybeSendReceiptEmail(record, { email } = {}) {
   }
 }
 
+// The receipt "transaction" for an application fee that was paid by an
+// attached receipt (no PaymentTransaction row) and verified by Accounts.
+// Shared by sendAccountsVerificationReceipt below and the Sent Receipts
+// download route (routes/sent_receipt_routes.js), which regenerates the PDF
+// from this if the original file is no longer on disk.
+export function accountsVerificationReceiptTx(raw) {
+  return {
+    transaction_ref: `ERB-${raw.id}-ACCTVERIFIED`,
+    application_id:  raw.id,
+    applicant_name:  formatApplicantName(raw),
+    // No PaymentTransaction row to carry a quoted_amount here (the receipt
+    // was attached directly at submission), so quote straight from the fee
+    // schedule using this application's own category/profession.
+    amount:          resolveQuotedFee('APPLICATION', raw.category || raw.profession),
+    provider:        null,
+    phone:           raw.telephone || raw.registered_phone_number || raw.provided_number,
+    purpose:         'APPLICATION',
+    payment_method:  'RECEIPT',
+    status:          'SUCCESS',
+    updatedAt:       raw.accounts_verified_at || new Date(),
+  }
+}
+
 // ── Accounts-verification → PDF receipt → email ─────────────────────
 // Triggered by POST /accounts_verify (application_routes.js) the moment
 // an Accounts-level admin confirms an applicant's payment. This is the
@@ -310,25 +337,12 @@ export async function sendAccountsVerificationReceipt(application) {
     { where: { id: raw.id } }
   )
 
-  const syntheticRef = `ERB-${raw.id}-ACCTVERIFIED`
-  // No PaymentTransaction row to carry a quoted_amount here (the receipt
-  // was attached directly at submission), so quote straight from the fee
-  // schedule using this application's own category/profession.
-  const quotedAmount = resolveQuotedFee('APPLICATION', raw.category || raw.profession)
+  const receiptTx = accountsVerificationReceiptTx(raw)
+  const syntheticRef = receiptTx.transaction_ref
+  const quotedAmount = receiptTx.amount
 
   try {
-    const filePath = await generateReceiptPdf({
-      transaction_ref: syntheticRef,
-      application_id:  raw.id,
-      applicant_name:  applicantName,
-      amount:          quotedAmount,
-      provider:        null,
-      phone:            raw.telephone || raw.registered_phone_number || raw.provided_number,
-      purpose:          'APPLICATION',
-      payment_method:   'RECEIPT',
-      status:           'SUCCESS',
-      updatedAt:        raw.accounts_verified_at || new Date(),
-    })
+    const filePath = await generateReceiptPdf(receiptTx)
 
     await paymentReceiptQueue.add(
       'send-payment-receipt',
@@ -353,6 +367,49 @@ export async function sendAccountsVerificationReceipt(application) {
       { where: { id: raw.id } }
     ).catch(() => {})
   }
+}
+
+// ── Registration-fee verification → PDF receipt → email ────────────
+// Called from POST /registration_fee/verify (application_routes.js) once
+// Accounts confirms the post-Board registration fee. Before this, only a
+// gateway-confirmed online registration payment ever produced a receipt —
+// an attached-receipt registration payment verified by Accounts got a
+// licence number but no receipt. Deduplicated by receipt_email_status, so
+// a payment the gateway already receipted is not sent twice.
+export async function sendRegistrationFeeReceipt(application) {
+  if (!application) return
+  const raw = typeof application.toJSON === 'function' ? application.toJSON() : application
+
+  const or = [{ application_id: String(raw.id) }]
+  if (raw.registration_fee_ref) or.unshift({ transaction_ref: raw.registration_fee_ref })
+
+  const candidates = await PaymentTransaction.findAll({
+    where: { purpose: 'REGISTRATION', status: { [Op.ne]: 'DELETED' }, [Op.or]: or },
+    order: [['updatedAt', 'DESC']],
+  })
+  // Prefer the transaction the application points at, then any successful one.
+  const rows = candidates.map(c => c.toJSON())
+  const payment =
+    rows.find(t => raw.registration_fee_ref && t.transaction_ref === raw.registration_fee_ref) ||
+    rows.find(t => normaliseStatus(t.status) === 'SUCCESS') ||
+    rows[0]
+
+  if (!payment) {
+    console.error(`[registration-fee-receipt] No REGISTRATION payment on file for application ${raw.id} — skipping receipt`)
+    return
+  }
+  if (payment.receipt_email_status === 'QUEUED' || payment.receipt_email_status === 'SENT') return
+
+  await maybeSendReceiptEmail(
+    {
+      ...payment,
+      status:         'SUCCESS',
+      purpose:        'REGISTRATION',
+      applicant_name: payment.applicant_name || formatApplicantName(raw),
+      quoted_amount:  payment.quoted_amount ?? raw.registration_fee_amount ?? null,
+    },
+    { email: payment.email || raw.email_address }
+  )
 }
 
 // ── Controller ────────────────────────────────────────────────────
