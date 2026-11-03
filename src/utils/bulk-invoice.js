@@ -173,6 +173,7 @@ export function parseSpreadsheet(buffer, originalName = '') {
 // Temporary engineers: 2027 renewal at UGX 1,800,000, no surcharge billed.
 export const defaultTemporaryBatchSettings = () => ({
   invoice_date:         toISODate(new Date()),
+  use_batch_date:       true,
   financial_year:       '2027',
   arrears_year:         '',
   annual_fee_engineers: 1,
@@ -187,6 +188,7 @@ export const defaultBatchSettingsFor = (type) =>
 
 export const defaultBatchSettings = () => ({
   invoice_date:         toISODate(new Date()),
+  use_batch_date:       true,
   financial_year:       '2026/2027',
   arrears_year:         '2025/2026',
   annual_fee_engineers: 1,
@@ -267,7 +269,11 @@ export function validateRow(raw, defaults, { autoInvoiceNo, invoiceType = 'ANNUA
   }
 
   // Date
-  const dateVal = pick('invoice_date')
+  // By default every invoice in a batch carries the batch date. A "Date"
+  // column in the file is only honoured when use_batch_date is switched off —
+  // spreadsheet dates like 11/3/2026 are ambiguous (11 Mar vs 3 Nov).
+  const useBatchDate = !['false', '0', 'no'].includes(String(defaults.use_batch_date).toLowerCase())
+  const dateVal = useBatchDate && !isBlank(defaults.invoice_date) ? defaults.invoice_date : pick('invoice_date')
   data.invoice_date = parseDate(dateVal)
   if (!data.invoice_date) errors.push(`Invoice date "${dateVal}" is not a valid date (use YYYY-MM-DD or DD/MM/YYYY)`)
 
