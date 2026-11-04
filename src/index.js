@@ -185,10 +185,11 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
       console.log(`[payment-update] DB updated ${request_id} → ${dbStatus} (${affected} row)`);
 
       if (dbStatus === "SUCCESS") {
-        // Gateway-confirmed success: email the receipt and, for online
-        // payments, skip Accounts review (application → Board review,
-        // renewal → approved). Receipt/failed/pending payments are not
-        // touched — see onConfirmedPaymentUpdate in receipt-controller.js.
+        // Gateway-confirmed success: for application/registration fees,
+        // email the receipt and skip Accounts review (application → Board
+        // review). RENEWAL payments are left for Accounts to verify on the
+        // Renewal Payments page before any receipt goes out. Receipt/failed/
+        // pending payments are not touched — see onConfirmedPaymentUpdate.
         const record = await PaymentTransaction.findOne({ where: { transaction_ref: String(request_id) } });
         onConfirmedPaymentUpdate(record).catch(err =>
           console.error(`[payment-update] confirmed-payment pipeline failed for ${request_id}:`, err.message)

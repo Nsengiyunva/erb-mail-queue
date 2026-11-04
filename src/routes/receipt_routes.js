@@ -444,7 +444,9 @@ router.post('/transactions/:id/retry', async (req, res) => {
 // Marking SUCCESS fires the same receipt-email pipeline as any other
 // confirmed payment (maybeSendReceiptEmail), so the applicant still gets
 // their receipt even though this is a manual override, not a system
-// confirmation. Marking DELETED makes the row disappear from GET
+// confirmation — EXCEPT for RENEWAL payments, which still need Accounts
+// approval on the Renewal Payments page before a receipt goes out (the
+// guard lives in maybeSendReceiptEmail). Marking DELETED makes the row disappear from GET
 // /transactions and GET /renewals for everyone (admin included) — there
 // is currently no "show deleted" view, so treat this as effectively
 // permanent from the UI's perspective.

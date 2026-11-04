@@ -203,6 +203,18 @@ export async function maybeSendReceiptEmail(record, { email } = {}) {
   const tx = typeof record.toJSON === 'function' ? record.toJSON() : record
 
   if (normaliseStatus(tx.status) !== 'SUCCESS') return
+
+  // RENEWAL receipts go out ONLY after Accounts approves the payment on the
+  // Renewal Payments verification page (POST /renewals/:id/approve), or when
+  // staff issue one manually from Sent Receipts (created already APPROVED).
+  // This holds for every renewal — gateway-confirmed MoMo, attached receipt,
+  // failed or pending — and for every caller (payment watcher, admin status
+  // override, resend), so nothing can bypass the Accounts review.
+  if (String(tx.purpose || '').toUpperCase() === 'RENEWAL' && tx.renewal_status !== 'APPROVED') {
+    console.log(`[receipt-pipeline] Renewal ${tx.transaction_ref} not yet approved by Accounts (renewal_status: ${tx.renewal_status || 'null'}) — receipt held`)
+    return
+  }
+
   if (tx.receipt_email_status === 'QUEUED' || tx.receipt_email_status === 'SENT') return
 
   // Claim it immediately so a near-simultaneous duplicate call (e.g.
@@ -491,7 +503,8 @@ export const saveTransaction = async (req, res) => {
     //
     // No receipt is sent from here. Receipts go out automatically ONLY when
     // the payment watcher reports the transaction SUCCESS (payment-update
-    // webhook → onConfirmedPaymentUpdate). Every other payment — a SUCCESS
+    // webhook → onConfirmedPaymentUpdate) — and never for RENEWAL, which
+    // always waits for Accounts approval. Every other payment — a SUCCESS
     // the browser declares when the MoMo prompt is merely sent, a receipt
     // upload, a failed or pending payment — waits for Accounts to review
     // and verify it; the receipt is sent from that approval.
@@ -673,6 +686,7 @@ export async function sendRenewalRejectedNotice(tx, reason) {
 
 // ══════════════════════════════════════════════════════════════════
 // Confirmed online payments — auto receipt + skip Accounts review
+// (application & registration fees only — not renewals)
 // ══════════════════════════════════════════════════════════════════
 // Policy:
 //   • Online (Mobile Money / FlexiPay) payment CONFIRMED successful by the
@@ -680,7 +694,12 @@ export async function sendRenewalRejectedNotice(tx, reason) {
 //     away, with no Accounts review:
 //       – APPLICATION fee → the application skips "Payment review" and
 //         goes straight to Board review (ACCOUNTS_APPROVED).
-//       – RENEWAL fee     → renewal_status is set to APPROVED.
+//       – REGISTRATION fee → marked paid.
+//   • RENEWAL fees are the exception: EVERY renewal payment — confirmed
+//     online, attached receipt, failed or pending — waits on the Renewal
+//     Payments verification page; the receipt goes out only when Accounts
+//     approves it (POST /renewals/:id/approve). See the guard in
+//     maybeSendReceiptEmail.
 //   • Attached receipts, failed or still-pending payments → unchanged:
 //     they wait for Accounts to review before any receipt goes out.
 //
@@ -891,29 +910,16 @@ export async function onConfirmedPaymentUpdate(record) {
 
   const purpose = String(tx.purpose || 'APPLICATION').toUpperCase()
 
+  // Renewals are never auto-approved or auto-receipted. The watcher has
+  // already stamped status SUCCESS + gateway_confirmed_at (index.js), which
+  // Accounts sees on the Renewal Payments verification page; the receipt is
+  // sent from POST /renewals/:id/approve once they verify it.
   if (purpose === 'RENEWAL') {
-    // Confirmed online renewal → approve without Accounts review, unless
-    // Accounts already made a decision on it.
-    if (!tx.renewal_status || tx.renewal_status === 'PENDING') {
-      await PaymentTransaction.update(
-        {
-          renewal_status:         'APPROVED',
-          renewal_reviewed_by:    'ERB System (online payment)',
-          renewal_reviewed_at:    new Date(),
-          renewal_review_comment: 'Approved automatically — online payment reported SUCCESS by the payment watcher.',
-        },
-        { where: { transaction_ref: tx.transaction_ref } }
-      )
-    }
+    console.log(`[payment-update] Renewal ${tx.transaction_ref} confirmed by gateway — awaiting Accounts verification before receipt`)
+    return
   }
 
-  if (purpose === 'RENEWAL') {
-    // Renewal transactions don't always map back to an application row, so
-    // use the renewal email lookup (same as an Accounts approval does).
-    await sendRenewalApprovedReceipt(tx)
-  } else {
-    await maybeSendReceiptEmail(tx)
-  }
+  await maybeSendReceiptEmail(tx)
 
   if (purpose === 'APPLICATION') {
     await autoAdvanceIfPaidOnline(tx.application_id).catch(err =>
