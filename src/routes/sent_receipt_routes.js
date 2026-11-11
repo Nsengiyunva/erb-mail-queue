@@ -783,7 +783,8 @@ router.post('/:kind/:id/resend', async (req, res) => {
 
     if (kind === 'tx') {
       await PaymentTransaction.update({ receipt_email_status: null }, { where: { id: raw.id } })
-      await maybeSendReceiptEmail({ ...raw, receipt_email_status: null, status: 'SUCCESS' })
+      // Resending a receipt that was already released — it passed the Accounts gate the first time.
+      await maybeSendReceiptEmail({ ...raw, receipt_email_status: null, status: 'SUCCESS' }, { accountsApproved: true })
     } else if (kind === 'app') {
       await Application.update({ accounts_receipt_email_status: null }, { where: { id: raw.id } })
       await sendAccountsVerificationReceipt({ ...raw, accounts_receipt_email_status: null })

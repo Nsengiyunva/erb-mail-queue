@@ -3,7 +3,7 @@ import { Worker } from 'bullmq';
 import connection from '../redis/connection.js';
 import * as db from '../models/index.js';
 import sponsorNotificationQueue from '../queues/sponsor_notification_queue.js';
-import { autoAdvanceIfPaidOnline, advanceIfPaymentAlreadyVerified } from '../controllers/receipt-controller.js';
+import { advanceIfPaymentAlreadyVerified } from '../controllers/receipt-controller.js';
 
 const Application = db.sequelize.models.Application;
 
@@ -113,16 +113,11 @@ const worker = new Worker(
 
       await job.updateProgress(50);
 
-      // Application fee already paid online and confirmed by the gateway
-      // (the wizard takes payment just before Submit)? Then skip Accounts'
-      // Payment review and go straight to Board review. No-op for receipt
-      // uploads and unconfirmed/failed payments.
-      await autoAdvanceIfPaidOnline(application.id).catch(err =>
-        console.error(`[ApplicationWorker] auto payment verification failed for ${application.id}:`, err.message)
-      );
-
-      // Resubmission of an application sent back by the Board AFTER its
-      // payment was verified? Skip Payment review → straight to Board review.
+      // Every NEW application waits in Payment review for Accounts to approve
+      // the fee (online or attached receipt) — that approval sends the receipt.
+      // The one exception: a resubmission of an application sent back AFTER
+      // Accounts had already verified its payment skips Payment review and
+      // goes straight to Board review.
       await advanceIfPaymentAlreadyVerified(application.id).catch(err =>
         console.error(`[ApplicationWorker] previously-verified advance failed for ${application.id}:`, err.message)
       );

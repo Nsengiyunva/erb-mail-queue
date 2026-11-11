@@ -16,7 +16,7 @@ import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
-import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillAutoVerifiedApplications, backfillPreviouslyVerifiedResubmissions } from "./controllers/receipt-controller.js";
+import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillPreviouslyVerifiedResubmissions } from "./controllers/receipt-controller.js";
 import { scheduleDraftCleanup } from "./utils/draft-cleanup.js";
 
 // Workers
@@ -172,8 +172,8 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
       {
         status: dbStatus,
         ...(amount != null ? { amount } : {}),
-        // The watcher reporting SUCCESS is the only thing that may move an
-        // application past Payment review automatically — stamp it.
+        // Marks "the gateway itself confirmed this payment" (shown to Accounts
+        // as evidence while they review it; it does not skip their review).
         ...(dbStatus === "SUCCESS" ? { gateway_confirmed_at: new Date() } : {}),
       },
       { where: { transaction_ref: String(request_id) } }
@@ -185,11 +185,11 @@ app.post("/api/erb/receipt/payment-update", async (req, res) => {
       console.log(`[payment-update] DB updated ${request_id} → ${dbStatus} (${affected} row)`);
 
       if (dbStatus === "SUCCESS") {
-        // Gateway-confirmed success: for application/registration fees,
-        // email the receipt and skip Accounts review (application → Board
-        // review). RENEWAL payments are left for Accounts to verify on the
-        // Renewal Payments page before any receipt goes out. Receipt/failed/
-        // pending payments are not touched — see onConfirmedPaymentUpdate.
+        // Gateway-confirmed success is only RECORDED (and a registration fee
+        // marked paid). No receipt is sent and no application moves on: every
+        // payment — application, registration, renewal — waits for Accounts
+        // to approve it, and that approval sends the receipt. See
+        // onConfirmedPaymentUpdate.
         const record = await PaymentTransaction.findOne({ where: { transaction_ref: String(request_id) } });
         onConfirmedPaymentUpdate(record).catch(err =>
           console.error(`[payment-update] confirmed-payment pipeline failed for ${request_id}:`, err.message)
@@ -244,13 +244,8 @@ io.on("connection", (socket) => {
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on port ${PORT}`);
 
-  // Catch up applications that were already paid online (gateway-confirmed)
-  // but are still waiting in Accounts' Payment review.
   setTimeout(() => {
-    backfillAutoVerifiedApplications().catch(err =>
-      console.error("[auto-verify] backfill failed:", err.message)
-    );
-    // Resubmissions (sent back by the Board after payment was verified)
+    // Resubmissions (sent back by the Board after Accounts verified the fee)
     // that are still waiting in Payment review → Board review.
     backfillPreviouslyVerifiedResubmissions().catch(err =>
       console.error("[auto-verify] previously-verified backfill failed:", err.message)

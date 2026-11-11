@@ -441,12 +441,11 @@ router.post('/transactions/:id/retry', async (req, res) => {
 // but the MoMo callback never landed, a duplicate/erroneous record that
 // should be removed, etc).
 //
-// Marking SUCCESS fires the same receipt-email pipeline as any other
-// confirmed payment (maybeSendReceiptEmail), so the applicant still gets
-// their receipt even though this is a manual override, not a system
-// confirmation — EXCEPT for RENEWAL payments, which still need Accounts
-// approval on the Renewal Payments page before a receipt goes out (the
-// guard lives in maybeSendReceiptEmail). Marking DELETED makes the row disappear from GET
+// Marking SUCCESS releases the receipt ONLY when the caller is the ACCOUNTS
+// role (that is an Accounts approval); any other role just records the
+// status and the receipt waits for Accounts. RENEWAL payments additionally
+// need approval on the Renewal Payments page (guard in maybeSendReceiptEmail).
+// Marking DELETED makes the row disappear from GET
 // /transactions and GET /renewals for everyone (admin included) — there
 // is currently no "show deleted" view, so treat this as effectively
 // permanent from the UI's perspective.
@@ -483,7 +482,7 @@ router.post('/transactions/:id/status', async (req, res) => {
     // Best-effort, non-blocking — the status change itself is already
     // recorded above regardless of whether the email succeeds.
     if (normalized === 'SUCCESS') {
-      maybeSendReceiptEmail(tx, { email: tx.email }).catch(err =>
+      maybeSendReceiptEmail(tx, { email: tx.email, accountsApproved: role === 'ACCOUNTS' }).catch(err =>
         console.error('[transactions/status] receipt email failed:', err.message)
       )
     }

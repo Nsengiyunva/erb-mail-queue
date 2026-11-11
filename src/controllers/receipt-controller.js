@@ -198,11 +198,28 @@ export async function resolveQuotedAmount(tx) {
 // SUCCESS, and receipt_email_status guards against sending the same
 // receipt twice (e.g. a retried webhook, or saveTransaction and the
 // webhook both firing for the same transaction_ref).
-export async function maybeSendReceiptEmail(record, { email } = {}) {
+export async function maybeSendReceiptEmail(record, { email, accountsApproved = false } = {}) {
   if (!record) return
   const tx = typeof record.toJSON === 'function' ? record.toJSON() : record
 
   if (normaliseStatus(tx.status) !== 'SUCCESS') return
+
+  // ── Accounts gate (every purpose, every payment method) ──────────────
+  // No receipt — application, registration or renewal; paid online or by an
+  // attached receipt — is emailed until Accounts has approved the payment.
+  // Callers that ARE an Accounts approval pass { accountsApproved: true }:
+  //   • sendAccountsVerificationReceipt  (POST /accounts_verify)
+  //   • sendRegistrationFeeReceipt       (POST /registration_fee/verify)
+  //   • sendRenewalApprovedReceipt       (POST /renewals/:id/approve)
+  //   • the Payment Tracker status override, when made by the ACCOUNTS role
+  //   • a resend of a receipt that was already released
+  // Anything else (the payment watcher, a browser-declared SUCCESS, an
+  // override by another role) is held. Receipts staff issue by hand from
+  // Sent Receipts (source 'ADMIN') are the issuer's own act and pass.
+  if (!accountsApproved && String(tx.source || '').toUpperCase() !== 'ADMIN') {
+    console.log(`[receipt-pipeline] ${tx.transaction_ref} (${tx.purpose || 'APPLICATION'}) not yet approved by Accounts — receipt held`)
+    return
+  }
 
   // RENEWAL receipts go out ONLY after Accounts approves the payment on the
   // Renewal Payments verification page (POST /renewals/:id/approve), or when
@@ -345,7 +362,7 @@ export async function sendAccountsVerificationReceipt(application) {
     if (payment.receipt_email_status === 'QUEUED' || payment.receipt_email_status === 'SENT') return
     await maybeSendReceiptEmail(
       { ...payment.toJSON(), status: 'SUCCESS', applicant_name: payment.applicant_name || applicantName },
-      { email }
+      { email, accountsApproved: true }
     )
     return
   }
@@ -434,7 +451,7 @@ export async function sendRegistrationFeeReceipt(application) {
       applicant_name: payment.applicant_name || formatApplicantName(raw),
       quoted_amount:  payment.quoted_amount ?? raw.registration_fee_amount ?? null,
     },
-    { email: payment.email || raw.email_address }
+    { email: payment.email || raw.email_address, accountsApproved: true }
   )
 }
 
@@ -501,13 +518,10 @@ export const saveTransaction = async (req, res) => {
     // out, so any failure here is only ever logged, never surfaced as an
     // API error to the caller.
     //
-    // No receipt is sent from here. Receipts go out automatically ONLY when
-    // the payment watcher reports the transaction SUCCESS (payment-update
-    // webhook → onConfirmedPaymentUpdate) — and never for RENEWAL, which
-    // always waits for Accounts approval. Every other payment — a SUCCESS
-    // the browser declares when the MoMo prompt is merely sent, a receipt
-    // upload, a failed or pending payment — waits for Accounts to review
-    // and verify it; the receipt is sent from that approval.
+    // No receipt is sent from here, and none is sent by the payment watcher
+    // either. Every payment — online or attached receipt, application,
+    // registration or renewal — waits for Accounts to approve it; the
+    // receipt is sent from that approval (see maybeSendReceiptEmail).
 
   } catch (err) {
     console.error('[save-transaction]', err.message)
@@ -633,7 +647,7 @@ export async function sendRenewalApprovedReceipt(tx) {
     return
   }
 
-  await maybeSendReceiptEmail({ ...raw, status: 'SUCCESS', purpose: 'RENEWAL' }, { email })
+  await maybeSendReceiptEmail({ ...raw, status: 'SUCCESS', purpose: 'RENEWAL' }, { email, accountsApproved: true })
 }
 
 // Rejection → a plain notice, no receipt attached (there's nothing to
@@ -685,23 +699,25 @@ export async function sendRenewalRejectedNotice(tx, reason) {
 
 
 // ══════════════════════════════════════════════════════════════════
-// Confirmed online payments — auto receipt + skip Accounts review
-// (application & registration fees only — not renewals)
+// Payments and receipts — Accounts approves first
 // ══════════════════════════════════════════════════════════════════
-// Policy:
-//   • Online (Mobile Money / FlexiPay) payment CONFIRMED successful by the
-//     payment gateway → the applicant gets their receipt by email straight
-//     away, with no Accounts review:
-//       – APPLICATION fee → the application skips "Payment review" and
-//         goes straight to Board review (ACCOUNTS_APPROVED).
-//       – REGISTRATION fee → marked paid.
-//   • RENEWAL fees are the exception: EVERY renewal payment — confirmed
-//     online, attached receipt, failed or pending — waits on the Renewal
-//     Payments verification page; the receipt goes out only when Accounts
-//     approves it (POST /renewals/:id/approve). See the guard in
-//     maybeSendReceiptEmail.
-//   • Attached receipts, failed or still-pending payments → unchanged:
-//     they wait for Accounts to review before any receipt goes out.
+// Policy (application, registration AND renewal fees; paid online or by an
+// attached receipt — no exceptions):
+//   • Every payment waits for the Accounts role to approve it. Only that
+//     approval releases the receipt email to the engineer / applicant:
+//       – APPLICATION fee  → Payment review → POST /accounts_verify
+//       – REGISTRATION fee → POST /registration_fee/verify
+//       – RENEWAL fee      → POST /renewals/:id/approve
+//     (see the gate in maybeSendReceiptEmail).
+//   • A gateway-confirmed online payment is only RECORDED: the watcher
+//     webhook stamps status SUCCESS + gateway_confirmed_at so Accounts can
+//     see the money arrived, and a registration fee is marked paid so the
+//     applicant isn't asked to pay twice. It sends nothing and moves no
+//     application on.
+//   • One exception to the Payment-review step, for NEW applications: an
+//     application whose fee Accounts ALREADY verified and which the Board
+//     then sent back goes straight to Board review when it is resubmitted
+//     (advanceIfPaymentAlreadyVerified below).
 //
 // "Confirmed" deliberately means the VM1 payment watcher's webhook
 // (POST /api/erb/receipt/payment-update, see index.js) — NOT the
@@ -733,56 +749,6 @@ async function logAutoEvent(applicationId, message) {
   }
 }
 
-// Moves a submitted application from Payment review straight to Board
-// review if its application fee was paid online and confirmed. Safe to call
-// any time, any number of times: it only acts on an application currently
-// in SPONSOR_APPROVED (i.e. submitted and waiting for Accounts) that hasn't
-// been verified yet. Called from the payment webhook (payment confirmed
-// after submission) and from application_worker.js (payment confirmed
-// before the applicant pressed Submit — the usual order in the wizard).
-export async function autoAdvanceIfPaidOnline(applicationId) {
-  if (!applicationId || !/^\d+$/.test(String(applicationId))) return { advanced: false, reason: 'not an application id' }
-
-  const application = await Application.findByPk(applicationId)
-  if (!application) return { advanced: false, reason: 'application not found' }
-  const raw = application.toJSON()
-
-  if (String(raw.status || '').toUpperCase() !== 'SPONSOR_APPROVED') return { advanced: false, reason: `status ${raw.status}` }
-  if (raw.accounts_verified_at) return { advanced: false, reason: 'already verified' }
-
-  // Only transactions the payment watcher itself reported SUCCESS
-  // (gateway_confirmed_at) — never a client-declared or admin-set SUCCESS.
-  const candidates = await PaymentTransaction.findAll({
-    where: {
-      application_id:       String(raw.id),
-      status:               'SUCCESS',
-      gateway_confirmed_at: { [Op.ne]: null },
-      [Op.or]: [{ purpose: 'APPLICATION' }, { purpose: null }],
-    },
-    order: [['updatedAt', 'DESC']],
-  })
-  const paid = candidates.map(c => c.toJSON()).find(isOnlineTx)
-  if (!paid) return { advanced: false, reason: 'no watcher-confirmed online payment' }
-
-  const note = `Payment verified automatically — online payment reported SUCCESS by the payment watcher (ref ${paid.transaction_ref}).`
-  await application.update({
-    status:               'ACCOUNTS_APPROVED',
-    accounts_comment:     note,
-    accounts_verified_by: 'ERB System (online payment)',
-    accounts_verified_at: new Date(),
-  })
-  logAutoEvent(raw.id, note)
-
-  // The receipt itself goes out via maybeSendReceiptEmail on the
-  // transaction (deduplicated by receipt_email_status) — make sure it has.
-  maybeSendReceiptEmail(paid).catch(err =>
-    console.error(`[auto-verify] receipt for ${paid.transaction_ref} failed:`, err.message)
-  )
-
-  console.log(`[auto-verify] Application ${raw.id} → ACCOUNTS_APPROVED (online payment ${paid.transaction_ref})`)
-  return { advanced: true, transaction_ref: paid.transaction_ref }
-}
-
 // ── Resubmissions whose payment was already verified ──────────────
 // An application the Board/Registration sent back AFTER Accounts verified
 // the fee keeps accounts_verified_at (send-back never clears it, and an
@@ -791,6 +757,12 @@ export async function autoAdvanceIfPaidOnline(applicationId) {
 // /:id/prior_payment) — so it must not land in Accounts' Payment review
 // again either: move it straight to Board review (ACCOUNTS_APPROVED).
 // The original verification (comment / by / at) is left untouched.
+// Applications verified by the old automatic online-payment rule (before
+// Accounts approval became mandatory) carry this marker instead of an
+// Accounts officer's name. They were never verified BY Accounts, so they
+// don't qualify for the resubmission shortcut.
+export const SYSTEM_AUTO_VERIFIER = 'ERB System (online payment)'
+
 export async function advanceIfPaymentAlreadyVerified(applicationId) {
   if (!applicationId || !/^\d+$/.test(String(applicationId))) return { advanced: false, reason: 'not an application id' }
 
@@ -800,6 +772,7 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
 
   if (String(raw.status || '').toUpperCase() !== 'SPONSOR_APPROVED') return { advanced: false, reason: `status ${raw.status}` }
   if (!raw.accounts_verified_at) return { advanced: false, reason: 'payment not previously verified' }
+  if (raw.accounts_verified_by === SYSTEM_AUTO_VERIFIER) return { advanced: false, reason: 'verified automatically, not by Accounts' }
 
   // Conditional update so two triggers firing together (worker + sponsor
   // approval, or the startup backfill) can't both log the move.
@@ -823,7 +796,11 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
 // even though their payment was verified before they were sent back.
 export async function backfillPreviouslyVerifiedResubmissions() {
   const waiting = await Application.findAll({
-    where: { status: 'SPONSOR_APPROVED', accounts_verified_at: { [Op.ne]: null } },
+    where: {
+      status: 'SPONSOR_APPROVED',
+      accounts_verified_at: { [Op.ne]: null },
+      [Op.or]: [{ accounts_verified_by: null }, { accounts_verified_by: { [Op.ne]: SYSTEM_AUTO_VERIFIER } }],
+    },
     attributes: ['id'],
   })
   let advanced = 0
@@ -902,6 +879,9 @@ async function markRegistrationFeePaid(tx) {
 }
 
 // Entry point for a gateway-CONFIRMED status change (payment webhook).
+// Records the payment only — no receipt, no status change on the application.
+// Accounts approves it from Payment review / the registration-fee tab / the
+// Renewal Payments page, and that approval sends the receipt.
 export async function onConfirmedPaymentUpdate(record) {
   if (!record) return
   const tx = typeof record.toJSON === 'function' ? record.toJSON() : record
@@ -910,45 +890,11 @@ export async function onConfirmedPaymentUpdate(record) {
 
   const purpose = String(tx.purpose || 'APPLICATION').toUpperCase()
 
-  // Renewals are never auto-approved or auto-receipted. The watcher has
-  // already stamped status SUCCESS + gateway_confirmed_at (index.js), which
-  // Accounts sees on the Renewal Payments verification page; the receipt is
-  // sent from POST /renewals/:id/approve once they verify it.
-  if (purpose === 'RENEWAL') {
-    console.log(`[payment-update] Renewal ${tx.transaction_ref} confirmed by gateway — awaiting Accounts verification before receipt`)
-    return
-  }
-
-  await maybeSendReceiptEmail(tx)
-
-  if (purpose === 'APPLICATION') {
-    await autoAdvanceIfPaidOnline(tx.application_id).catch(err =>
-      console.error(`[auto-verify] application ${tx.application_id} not advanced:`, err.message)
-    )
-  }
-
   if (purpose === 'REGISTRATION') {
     await markRegistrationFeePaid(tx).catch(err =>
       console.error(`[registration-fee] ${tx.transaction_ref} not marked paid:`, err.message)
     )
   }
-}
 
-// Startup catch-up: re-checks applications waiting in Payment review in case
-// the watcher confirmed their payment while erb-helper was down mid-flow.
-// Only ever advances on a watcher-confirmed transaction (gateway_confirmed_at
-// is set exclusively by the webhook), so payments confirmed before this
-// change — which have no stamp — stay with Accounts. Safe to re-run.
-export async function backfillAutoVerifiedApplications() {
-  const waiting = await Application.findAll({
-    where: { status: 'SPONSOR_APPROVED', accounts_verified_at: null },
-    attributes: ['id'],
-  })
-  let advanced = 0
-  for (const a of waiting) {
-    const r = await autoAdvanceIfPaidOnline(a.id).catch(() => ({ advanced: false }))
-    if (r.advanced) advanced++
-  }
-  if (advanced) console.log(`[auto-verify] backfill: ${advanced} application(s) moved to Board review`)
-  return advanced
+  console.log(`[payment-update] ${purpose} payment ${tx.transaction_ref} confirmed by gateway — awaiting Accounts approval before a receipt is sent`)
 }

@@ -152,9 +152,13 @@ function computeEffectiveStatus(raw) {
 function deriveEffectiveStatus(row, raw) {
   const effective = computeEffectiveStatus(raw);
   if (effective.changed) {
-    row.update({ status: effective.status, sponsors: effective.sponsors }).catch((err) =>
-      console.error(`[application_routes] Failed to self-heal status for application ${raw.id}:`, err.message)
-    );
+    row.update({ status: effective.status, sponsors: effective.sponsors })
+      // A resubmission whose fee Accounts already verified must not sit in
+      // Payment review just because this lazy write got there first.
+      .then(() => advanceIfPaymentAlreadyVerified(raw.id))
+      .catch((err) =>
+        console.error(`[application_routes] Failed to self-heal status for application ${raw.id}:`, err.message)
+      );
   }
   return effective;
 }
