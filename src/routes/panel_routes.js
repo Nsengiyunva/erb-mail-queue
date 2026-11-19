@@ -44,10 +44,11 @@ const requireStaff = (req, res, next) =>
 const requireViewer = (req, res, next) =>
   VIEW_ROLES.includes(roleOf(req)) ? next() : fail(res, 403, "You don't have access to this");
 
-// Resolves the signed-in PANEL user to their member record.
+// Resolves the signed-in user (PANEL account or an engineer) to their member record.
 async function resolveMember(req, res, next) {
   try {
-    if (roleOf(req) !== "PANEL") return fail(res, 403, "Panel members only");
+    // Membership is decided by the signed-in e-mail, so an engineer who logs in
+    // through the normal engineer portal can act as a panel member too.
     const email = emailOf(req);
     if (!email) return fail(res, 403, "Your e-mail is missing from the request");
     const member = await PanelMember.findOne({ where: { email, is_active: true }, include: [{ model: Panel, as: "panel" }] });
