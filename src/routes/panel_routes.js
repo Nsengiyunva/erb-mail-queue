@@ -185,6 +185,12 @@ router.put("/members/:id", requireStaff, async (req, res) => {
     if (req.body?.is_chair !== undefined) patch.is_chair = !!req.body.is_chair;
     if (req.body?.is_active !== undefined) {
       patch.is_active = !!req.body.is_active;
+      if (patch.is_active && !member.is_active) {
+        // Restoring: only if they are not active on another panel; they come back as an ordinary member.
+        const clash = await PanelMember.findOne({ where: { email: member.email, is_active: true } });
+        if (clash) return fail(res, 409, `${member.email} is already an active member of another panel`);
+        patch.is_chair = false;
+      }
       if (!patch.is_active) {
         const open = await PanelAssignment.count({ where: { member_id: member.id, status: "ASSIGNED" } });
         if (open) return fail(res, 409, `${member.name} still has ${open} open application(s). Re-assign them first.`);
