@@ -755,7 +755,7 @@ async function logAutoEvent(applicationId, message) {
 // Accounts-stage send-back always happens before verification). When the
 // applicant resubmits, the wizard already shows the fee as paid (GET
 // /:id/prior_payment) — so it must not land in Accounts' Payment review
-// again either: move it straight to Board review (ACCOUNTS_APPROVED).
+// again either: move it straight back to the allocation queue (AWAITING_ALLOCATION) so it can be re-assigned to a panel.
 // The original verification (comment / by / at) is left untouched.
 // Applications verified by the old automatic online-payment rule (before
 // Accounts approval became mandatory) carry this marker instead of an
@@ -777,7 +777,7 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
   // Conditional update so two triggers firing together (worker + sponsor
   // approval, or the startup backfill) can't both log the move.
   const [count] = await Application.update(
-    { status: 'ACCOUNTS_APPROVED' },
+    { status: 'AWAITING_ALLOCATION' },
     { where: { id: raw.id, status: 'SPONSOR_APPROVED' } }
   )
   if (!count) return { advanced: false, reason: 'already moved' }
@@ -785,10 +785,10 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
   const verifiedOn = new Date(raw.accounts_verified_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
   logAutoEvent(
     raw.id,
-    `Resubmitted after being sent back. The application fee was already verified by ${raw.accounts_verified_by || 'Accounts'} on ${verifiedOn}, so Payment review was skipped and the application went straight to Board review.`
+    `Resubmitted after being sent back. The application fee was already verified by ${raw.accounts_verified_by || 'Accounts'} on ${verifiedOn}, so Payment review was skipped and the application went straight back to the allocation queue for panel review.`
   )
 
-  console.log(`[auto-verify] Application ${raw.id} → ACCOUNTS_APPROVED (payment already verified ${raw.accounts_verified_at})`)
+  console.log(`[auto-verify] Application ${raw.id} → AWAITING_ALLOCATION (payment already verified ${raw.accounts_verified_at})`)
   return { advanced: true }
 }
 

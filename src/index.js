@@ -14,6 +14,7 @@ import receiptRoutes     from "./routes/receipt_routes.js";
 import { backfillLegacySentReceipts } from "./routes/sent_receipt_routes.js";
 import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
+import panelRoutes from "./routes/panel_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
 import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillPreviouslyVerifiedResubmissions } from "./controllers/receipt-controller.js";
@@ -62,7 +63,7 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "x-watcher-secret", "x-user-role", "x-applicant-id"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "x-watcher-secret", "x-user-role", "x-user-email", "x-applicant-id"],
 };
 
 app.use(cors(corsOptions));
@@ -133,6 +134,7 @@ app.use("/api/erb/receipt",     receiptRoutes);
 app.use("/api/erb/report",      reportRoutes);
 app.use("/api/erb/application", applicationRoutes);
 app.use("/api/erb/invoice",     invoiceRoutes);
+app.use("/api/erb/panel",       panelRoutes);
 
 // ── Bull Board queue dashboard (optional) ─────────────────────────
 // Loaded dynamically so the API still starts if the @bull-board

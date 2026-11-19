@@ -29,6 +29,8 @@ const STAGE_PROGRESS = {
   PENDING:                   45,
   AWAITING_SPONSOR_APPROVAL: 45,
   SPONSOR_APPROVED:          50,
+  AWAITING_ALLOCATION:       55,
+  PANEL_REVIEW:              62,
   ACCOUNTS_APPROVED:         70,
   BOARD_APPROVED:            85,
   FINALIZING:                95,
@@ -41,6 +43,9 @@ const STAGE_LABEL = {
   PENDING:                   'Submitted',
   AWAITING_SPONSOR_APPROVAL: 'Awaiting sponsors',
   SPONSOR_APPROVED:          'Payment review',
+  // Applicants see these labels too — internal panel steps are not exposed.
+  AWAITING_ALLOCATION:       'Under review',
+  PANEL_REVIEW:              'Under review',
   ACCOUNTS_APPROVED:         'Board review',
   BOARD_APPROVED:            'Registration fee',
   FINALIZING:                'Finalizing',

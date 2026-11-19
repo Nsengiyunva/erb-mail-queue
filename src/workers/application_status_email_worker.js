@@ -42,7 +42,7 @@ const commentHtml = (text, color) => commentToHtml(text, {
 // in one worker (rather than one queue per event) mirrors how close
 // they are: same recipient, same idempotent EmailLog bookkeeping, only
 // the copy changes.
-function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays, approvalLetter }) {
+function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays, approvalLetter, memberName, panelName, applications, evaluatorName, summary }) {
   const name         = applicantName || 'Applicant';
   const licenceLabel = applicationType || 'licence';
   const trackingLine = trackingNumber
@@ -157,6 +157,63 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
     };
   }
 
+  // ── Panel-review module (staff-facing; never sent to applicants) ──
+  if (type === 'PANEL_ASSIGNED') {
+    const list = (applications || []).map(a => `
+        <tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(a.trackingNumber)}</strong></td>
+          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;">${escapeHtml(a.applicantName)}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;">${escapeHtml([a.applicationType, a.category].filter(Boolean).join(' · '))}</td>
+        </tr>`).join('');
+    const n = (applications || []).length;
+    return {
+      subject: `ERB: ${n} new application${n === 1 ? '' : 's'} assigned to you for panel review`,
+      body: `
+        <h2 style="margin-top:0;">Dear ${escapeHtml(memberName || 'Panel member')},</h2>
+        <p>The following application${n === 1 ? ' has' : 's have'} been assigned to you for evaluation${panelName ? ` as a member of <strong>${escapeHtml(panelName)}</strong>` : ''}:</p>
+        <table style="width:100%;border-collapse:collapse;font-size:14px;margin:14px 0;">
+          <tr style="background:#f3f4f6;text-align:left;"><th style="padding:8px 10px;">Application</th><th style="padding:8px 10px;">Applicant</th><th style="padding:8px 10px;">Type</th></tr>
+          ${list}
+        </table>
+        <p style="text-align:center;margin:26px 0;">
+          <a href="${PORTAL_URL}/panel-my-applications" style="background-color:#1e40af;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Open my assigned applications</a>
+        </p>
+        <p style="font-size:13px;color:#6b7280;">Your comments are internal. They go to the Registrar and Registration Officer only and are never shared with the applicant.</p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
+  if (type === 'EVALUATION_SUBMITTED') {
+    return {
+      subject: `ERB: Panel evaluation submitted${trackingNumber ? ` — ${trackingNumber}` : ''}`,
+      body: `
+        <h2 style="margin-top:0;">Panel evaluation submitted</h2>
+        <p><strong>${escapeHtml(evaluatorName || 'A panel member')}</strong>${panelName ? ` (${escapeHtml(panelName)})` : ''} has submitted their evaluation for ${escapeHtml(applicantName || 'an applicant')}'s ${escapeHtml(applicationType || 'licence')} application.</p>
+        ${trackingLine}
+        ${summary ? `<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin:16px 0;"><p style="margin:0 0 6px;color:#1e3a8a;"><strong>Evaluation summary (internal):</strong></p><div style="color:#1e3a8a;line-height:1.5;">${commentHtml(summary, '#1e3a8a')}</div></div>` : ''}
+        <p>Please review the panel comments and either send the application back to the applicant or forward it to Board review.</p>
+        <p style="text-align:center;margin:26px 0;">
+          <a href="${PORTAL_URL}/submitted-applications" style="background-color:#1e40af;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Review application</a>
+        </p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
+  if (type === 'APPLICANT_RESUBMITTED') {
+    return {
+      subject: `ERB: Applicant resubmitted after send-back${trackingNumber ? ` — ${trackingNumber}` : ''}`,
+      body: `
+        <h2 style="margin-top:0;">Application resubmitted</h2>
+        <p><strong>${escapeHtml(applicantName || 'An applicant')}</strong> has corrected and resubmitted their ${escapeHtml(applicationType || 'licence')} application after it was sent back.</p>
+        ${trackingLine}
+        <p>It is back in the pool and needs to be allocated to a panel and panel member again.</p>
+        <p style="text-align:center;margin:26px 0;">
+          <a href="${PORTAL_URL}/allocation-queue" style="background-color:#1e40af;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Open allocation queue</a>
+        </p>
+        <p>Regards,<br/><strong>ERB Support Team</strong></p>`,
+    };
+  }
+
   // APPROVED
   const paymentUrl = applicationId ? `${PORTAL_URL}/application/${applicationId}` : PORTAL_URL;
   const fmtUGX = (n) => (n == null ? null : `UGX ${Number(n).toLocaleString()}`);
@@ -198,8 +255,8 @@ const worker = new Worker(
     try {
       await job.updateProgress(10);
 
-      if (!to) throw new Error('Missing applicant email');
-      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'REGISTERED', 'COMMENT', 'INACTIVITY_WARNING', 'INACTIVITY_DELETED'].includes(type)) {
+      if (!to) throw new Error('Missing recipient email');
+      if (!['RECEIVED', 'SENT_BACK', 'APPROVED', 'REGISTERED', 'COMMENT', 'INACTIVITY_WARNING', 'INACTIVITY_DELETED', 'PANEL_ASSIGNED', 'EVALUATION_SUBMITTED', 'APPLICANT_RESUBMITTED'].includes(type)) {
         throw new Error(`Unknown application status email type: ${type}`);
       }
 

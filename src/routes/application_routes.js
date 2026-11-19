@@ -10,6 +10,8 @@ import ApplicationModel from "../models/Application.js";
 import OldUserModel from "../models/OldUser.js";
 import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
+import { supersedeActiveAssignments } from "../utils/panel-models.js";
+import { notifyApplicantResubmitted } from "../utils/panel-notify.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, sendRegistrationFeeReceipt, advanceIfPaymentAlreadyVerified, findGatewayConfirmedPayment } from "../controllers/receipt-controller.js";
 import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
@@ -326,6 +328,13 @@ router.post("/submit-application", async (req, res) => {
           author_type: "APPLICANT",
           author_name: applicantDisplayName(payload) || "Applicant",
           author_id:   payload.applicant_id,
+        });
+        // Tell the Registrar / Registration Officer the application is back.
+        notifyApplicantResubmitted({
+          trackingNumber:  trackingNumber(application.id),
+          applicantName:   applicantDisplayName({ ...application.toJSON(), ...payload }) || "Applicant",
+          applicationType: payload?.type || application.type,
+          applicationId:   application.id,
         });
       }
       try {
@@ -838,6 +847,8 @@ router.get("/sponsor_requests/:sponsor_id", async (req, res) => {
     const SUBMITTED_STATUSES = [
       "AWAITING_SPONSOR_APPROVAL",
       "SPONSOR_APPROVED",
+      "AWAITING_ALLOCATION",
+      "PANEL_REVIEW",
       "ACCOUNTS_APPROVED",
       "BOARD_APPROVED",
       "FINALIZING",
@@ -1062,6 +1073,8 @@ router.get("/registry", async (req, res) => {
     const counts = {
       DRAFT:             draftCount,
       SPONSOR_APPROVED:  countsByStatus.SPONSOR_APPROVED || 0,
+      AWAITING_ALLOCATION: countsByStatus.AWAITING_ALLOCATION || 0,
+      PANEL_REVIEW:      countsByStatus.PANEL_REVIEW || 0,
       ACCOUNTS_APPROVED: countsByStatus.ACCOUNTS_APPROVED || 0,
       DEFERRED:          deferredCount,
       BOARD_APPROVED:    countsByStatus.BOARD_APPROVED || 0,
@@ -1537,8 +1550,11 @@ async function verifyApplicationPayment(applicationID, { comment, verified_by })
     throw err;
   }
 
+  // Panel review sits between payment verification and Board review: a
+  // verified application waits in the allocation queue until the Registrar /
+  // Registration Officer assigns it to a panel and panel member.
   await application.update({
-    status:               "ACCOUNTS_APPROVED",
+    status:               "AWAITING_ALLOCATION",
     sponsors:              effective.sponsors, // carries the sponsor-signed correction, if any, atomically
     accounts_comment:      comment.trim(),
     accounts_verified_by:  verified_by || "Admin",
@@ -1637,7 +1653,7 @@ router.post("/accounts_verify", async (req, res) => {
   try {
     const result = await verifyApplicationPayment(applicationID, { comment, verified_by });
     return res.status(200).json({
-      message: "Payment verified — application forwarded to the Board for review",
+      message: "Payment verified — application released to the allocation queue for panel review",
       ...result,
     });
   } catch (error) {
@@ -1682,7 +1698,7 @@ router.post("/accounts_verify_bulk", async (req, res) => {
 
     const succeeded = results.filter(r => r.ok).length;
     return res.status(200).json({
-      message: `${succeeded} of ${results.length} application(s) approved and forwarded to the Board`,
+      message: `${succeeded} of ${results.length} application(s) approved and released to the allocation queue`,
       results,
     });
   } catch (error) {
@@ -2318,8 +2334,10 @@ async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_
   const raw = application.toJSON();
   const effective = computeEffectiveStatus(raw);
 
-  if (effective.status !== "ACCOUNTS_APPROVED") {
-    const err = new Error(`This application isn't awaiting board review, so it can't be deferred here (current status: ${effective.status}).`);
+  // Registrar / Registration Officer may send an application back to the
+  // applicant from the allocation queue, during panel review, or at Board review.
+  if (!["ACCOUNTS_APPROVED", "AWAITING_ALLOCATION", "PANEL_REVIEW"].includes(effective.status)) {
+    const err = new Error(`This application isn't awaiting panel or board review, so it can't be deferred here (current status: ${effective.status}).`);
     err.status = 400;
     throw err;
   }
@@ -2337,6 +2355,10 @@ async function deferApplicationOnBoardBehalf(applicationID, { comment, deferred_
     deferred_by:    deferred_by || "Admin",
     deferred_at:    new Date(),
   });
+
+  // Close out the panel assignment: after resubmission the application goes
+  // back to the allocation pool and may go to a different panel / member.
+  await supersedeActiveAssignments(application.id);
 
   logApplicationEvent(application.id, {
     event: "SENT_BACK", message: comment, author_name: deferred_by || "Admin", author_role: "REGISTRATION",
