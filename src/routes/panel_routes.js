@@ -22,7 +22,7 @@ import ApplicationCommentModel from "../models/ApplicationComment.js";
 import { DataTypes } from "sequelize";
 import { formatApplicantName } from "../utils/applicant-name.js";
 import { sanitizeRichText, isRichText, richTextToPlain } from "../utils/rich-text.js";
-import { Panel, PanelMember, PanelAssignment, syncPanelTables, supersedeActiveAssignments, PANEL_STATUS } from "../utils/panel-models.js";
+import { Panel, PanelMember, PanelAssignment, ApplicationDocumentVersion, uploadedAtFromName, syncPanelTables, supersedeActiveAssignments, PANEL_STATUS } from "../utils/panel-models.js";
 import { notifyMemberAssigned, notifyEvaluationSubmitted } from "../utils/panel-notify.js";
 
 const router = express.Router();
@@ -238,6 +238,7 @@ router.post("/assign", requireStaff, async (req, res) => {
     if (!member.panel?.is_active) return fail(res, 400, "That panel is no longer active");
 
     const assigned = [];
+    const createdIds = [];
     const results = [];
     for (const applicationID of applicationIDs) {
       try {
@@ -254,10 +255,11 @@ router.post("/assign", requireStaff, async (req, res) => {
         // Re-assigning inside the same round keeps the round number; a fresh
         // allocation after a send-back starts the next one.
         const round = status === PANEL_STATUS.PANEL_REVIEW && (live || submittedBefore) ? (last || 1) : (last || 0) + 1;
-        await PanelAssignment.create({
+        const created = await PanelAssignment.create({
           application_id: application.id, panel_id: member.panel_id, member_id: member.id,
           assigned_by: assigned_by || "Admin", assigned_by_role: roleOf(req), status: "ASSIGNED", round,
         });
+        createdIds.push(created.id);
         await application.update({ status: PANEL_STATUS.PANEL_REVIEW });
         await ApplicationComment.create({
           application_id: application.id, event: "PANEL_ASSIGNED", visibility: "INTERNAL",
@@ -272,9 +274,11 @@ router.post("/assign", requireStaff, async (req, res) => {
       }
     }
     // One e-mail per member, listing everything allocated to them in this action.
-    await notifyMemberAssigned({ member, panel: member.panel, applications: assigned });
+    const emailJobId = await notifyMemberAssigned({ member, panel: member.panel, applications: assigned });
+    if (createdIds.length) await PanelAssignment.update({ email_job_id: emailJobId || null }, { where: { id: createdIds } }).catch(() => {});
     const ok = results.filter((r) => r.ok).length;
-    res.json({ message: `${ok} of ${results.length} application(s) assigned to ${member.name}${ok ? " — they have been e-mailed" : ""}`, results });
+    const emailNote = !ok ? "" : emailJobId ? ` — an e-mail to ${member.email} has been queued` : ` — but the e-mail to ${member.email} could not be queued, use “Resend email”`;
+    res.json({ message: `${ok} of ${results.length} application(s) assigned to ${member.name}${emailNote}`, email_queued: !!emailJobId, results });
   } catch (err) {
     console.error("[panel] assign:", err);
     fail(res, 500, "Could not assign the applications");
@@ -311,6 +315,19 @@ router.post("/application/:id/forward", requireStaff, async (req, res) => {
 
 // Everything the Registrar needs on one application's panel stage: current
 // assignment, history, and every panel comment — newest last.
+
+// Delivery status of an assignment e-mail, from the worker's e-mail log.
+// QUEUED = not logged yet (worker has not picked it up), SENT, FAILED, or NONE.
+const EmailLogModel = () => sequelize.models.EmailLog;
+async function emailStatusFor(assignment) {
+  if (!assignment?.email_job_id) return { status: "NONE" };
+  try {
+    const log = await EmailLogModel()?.findOne({ where: { job_id: `appStatus:${assignment.email_job_id}` }, order: [["id", "DESC"]] });
+    if (!log) return { status: "QUEUED" };
+    return { status: log.status, sent_at: log.sent_at, error: log.status === "FAILED" ? log.error_message : undefined };
+  } catch { return { status: "NONE" }; }
+}
+
 router.get("/application/:id/panel", requireViewer, async (req, res) => {
   try {
     const application = await Application.findByPk(req.params.id);
@@ -330,7 +347,8 @@ router.get("/application/:id/panel", requireViewer, async (req, res) => {
       status: application.status,
       current: current && {
         id: current.id, status: current.status, round: current.round, submitted_at: current.submitted_at,
-        panel: current.panel?.name, member: current.member && memberJson(current.member),
+        created_at: current.created_at, panel: current.panel?.name, member: current.member && memberJson(current.member),
+        email: await emailStatusFor(current),
       },
       history: assignments.map((a) => ({ id: a.id, round: a.round, status: a.status, panel: a.panel?.name, member: a.member?.name, created_at: a.created_at })),
       comments,
@@ -338,6 +356,81 @@ router.get("/application/:id/panel", requireViewer, async (req, res) => {
   } catch (err) {
     console.error("[panel] application panel view:", err);
     fail(res, 500, "Could not load the panel activity");
+  }
+});
+
+
+// Re-send the "you have been assigned" e-mail for one assignment.
+router.post("/assignment/:id/resend-email", requireStaff, async (req, res) => {
+  try {
+    const a = await PanelAssignment.findByPk(req.params.id, { include: [{ model: PanelMember, as: "member" }, { model: Panel, as: "panel" }] });
+    if (!a) return fail(res, 404, "Assignment not found");
+    if (a.status !== "ASSIGNED") return fail(res, 409, "Only a live assignment can be e-mailed again");
+    const application = await Application.findByPk(a.application_id);
+    if (!application) return fail(res, 404, "Application not found");
+    const raw = application.toJSON();
+    const jobId = await notifyMemberAssigned({
+      member: a.member, panel: a.panel,
+      applications: [{ trackingNumber: tracking(raw.id), applicantName: formatApplicantName(raw), applicationType: raw.type, category: raw.category }],
+    });
+    if (!jobId) return fail(res, 503, "The e-mail could not be queued. Please try again shortly.");
+    await a.update({ email_job_id: jobId });
+    res.json({ message: `E-mail to ${a.member.email} queued`, email: { status: "QUEUED" } });
+  } catch (err) {
+    console.error("[panel] resend email:", err);
+    fail(res, 500, "Could not re-send the e-mail");
+  }
+});
+
+// ───────────────────────── Documents, incl. earlier versions ─────────────────────────
+// Who may open an application's documents (and earlier versions): the Registrar /
+// Registration Officer / Board chairman, the panel member it is (or was) allocated
+// to, and the chairperson of that member's panel.
+async function canSeeDocuments(req, applicationId) {
+  if (VIEW_ROLES.includes(roleOf(req))) return true;
+  const email = emailOf(req);
+  if (!email) return false;
+  const me = await PanelMember.findOne({ where: { email, is_active: true } });
+  if (!me) return false;
+  const where = me.is_chair ? { application_id: applicationId, panel_id: me.panel_id } : { application_id: applicationId, member_id: me.id };
+  return !!(await PanelAssignment.findOne({ where }));
+}
+
+const DOC_LABELS = {
+  technical_path: "Technical report", career_path: "Career report",
+  uipe_membership_letter_path: "UIPE membership letter", uipe_membership_certificate_path: "UIPE membership certificate",
+  academic_certificates_path: "Academic certificates", transcripts_path: "Academic transcripts",
+  uneb_certificates_path: "UNEB certificates", verification_letters_path: "Verification letters",
+  other_qualifications_path: "Other qualifications", employment_letters_path: "Employment letters",
+  organogram_path: "Organogram", cpd_path: "CPD records",
+  passport_photo_1_path: "Passport photograph 1", passport_photo_2_path: "Passport photograph 2",
+};
+
+router.get("/application/:id/documents", async (req, res) => {
+  try {
+    await syncPanelTables();
+    if (!(await canSeeDocuments(req, req.params.id))) return fail(res, 403, "You don't have access to this application's documents");
+    const application = await Application.findByPk(req.params.id);
+    if (!application) return fail(res, 404, "Application not found");
+    const raw = application.toJSON();
+    const versions = await ApplicationDocumentVersion.findAll({ where: { application_id: raw.id }, order: [["version_no", "ASC"]], raw: true });
+    const byKey = {};
+    for (const v of versions) (byKey[v.doc_key] = byKey[v.doc_key] || []).push(v);
+    const documents = Object.keys(DOC_LABELS)
+      .filter((k) => raw[k] || byKey[k])
+      .map((k) => {
+        const file = raw[k] ? String(raw[k]).split("/").pop() : null;
+        const earlier = byKey[k] || [];
+        return {
+          key: k, label: DOC_LABELS[k],
+          current: file && { file_name: file, version_no: earlier.length + 1, uploaded_at: uploadedAtFromName(file) },
+          earlier: earlier.map((v) => ({ id: v.id, version_no: v.version_no, file_name: v.file_name, uploaded_at: v.uploaded_at, replaced_at: v.replaced_at, replaced_by: v.replaced_by })),
+        };
+      });
+    res.json({ application_id: raw.id, documents, has_earlier_versions: versions.length > 0 });
+  } catch (err) {
+    console.error("[panel] documents:", err);
+    fail(res, 500, "Could not load the documents");
   }
 });
 

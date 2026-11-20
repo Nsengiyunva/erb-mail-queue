@@ -26,20 +26,22 @@ export function reviewTeamRecipients() {
   return [...new Set(String(raw).split(/[,;\s]+/).map((e) => e.trim()).filter(Boolean))];
 }
 
+// Resolves to the queued job (or null if the queue could not take it).
 const queueOne = (name, data) =>
   applicationStatusEmailQueue
     .add(name, data, JOB_OPTS)
-    .catch((err) => console.error(`[panel-notify] could not queue ${data.type} email to ${data.to}:`, err.message));
+    .catch((err) => { console.error(`[panel-notify] could not queue ${data.type} email to ${data.to}:`, err.message); return null; });
 
 export async function notifyMemberAssigned({ member, panel, applications }) {
-  if (!member?.email || !applications?.length) return;
-  await queueOne("panel-assigned-email", {
+  if (!member?.email || !applications?.length) return null;
+  const job = await queueOne("panel-assigned-email", {
     type:         "PANEL_ASSIGNED",
     to:           member.email,
     memberName:   member.name,
     panelName:    panel?.name,
     applications, // [{ trackingNumber, applicantName, applicationType, category }]
   });
+  return job?.id != null ? String(job.id) : null;
 }
 
 export async function notifyEvaluationSubmitted({ trackingNumber, applicantName, applicationType, applicationId, evaluatorName, panelName, summary }) {

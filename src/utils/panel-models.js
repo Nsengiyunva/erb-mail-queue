@@ -64,6 +64,9 @@ export const PanelAssignment = define(
     // 1 for the first allocation; +1 every time the application returns to the pool.
     round:          { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
     submitted_at:   DataTypes.DATE,
+    // Queue job id of the "you have been assigned" e-mail, so staff can see
+    // whether it was sent (looked up in erb_email_logs) and re-send it.
+    email_job_id:   DataTypes.STRING(120),
   },
   {
     tableName: "erb_panel_assignments",
@@ -80,12 +83,63 @@ PanelAssignment.belongsTo(PanelMember, { foreignKey: "member_id", as: "member" }
 PanelAssignment.belongsTo(Panel, { foreignKey: "panel_id", as: "panel" });
 
 let synced = false;
+// ── Earlier versions of an applicant's documents ─────────────────────────────
+// When an applicant replaces a document after the application was sent back,
+// the previous file is NOT deleted: it is filed here as an earlier version so
+// the Registrar, the allocated panel member and the panel chairperson can still
+// open what was originally submitted. (Applicants never see these.)
+export const ApplicationDocumentVersion = define(
+  "ApplicationDocumentVersion",
+  {
+    id:             { type: DataTypes.BIGINT, primaryKey: true, autoIncrement: true },
+    application_id: { type: DataTypes.BIGINT, allowNull: false },
+    doc_key:        { type: DataTypes.STRING(60), allowNull: false },   // application column, e.g. technical_path
+    doc_title:      DataTypes.STRING(120),
+    file_name:      { type: DataTypes.STRING(400), allowNull: false },  // the replaced file in the uploads folder
+    version_no:     { type: DataTypes.INTEGER, allowNull: false },      // 1 = the first file submitted
+    uploaded_at:    DataTypes.DATE,                                     // when this file was uploaded (from its name)
+    replaced_by:    DataTypes.STRING(160),
+    reason:         { type: DataTypes.STRING(60), defaultValue: "REPLACED_AFTER_SEND_BACK" },
+  },
+  {
+    tableName: "erb_application_document_versions",
+    timestamps: true,
+    createdAt: "replaced_at",
+    updatedAt: false,
+    indexes: [{ fields: ["application_id", "doc_key"] }],
+  }
+);
+
+// multer names uploads "<Date.now()>-<original name>"; recover the upload time.
+export function uploadedAtFromName(fileName) {
+  const m = /^(\d{13})-/.exec(String(fileName || ""));
+  return m ? new Date(Number(m[1])) : null;
+}
+
+export async function archiveReplacedDocument({ applicationId, column, title, oldFile, newFile, by }) {
+  if (!oldFile || oldFile === newFile) return null;
+  await syncPanelTables();
+  const n = await ApplicationDocumentVersion.count({ where: { application_id: applicationId, doc_key: column } });
+  return ApplicationDocumentVersion.create({
+    application_id: applicationId, doc_key: column, doc_title: title, file_name: String(oldFile).split("/").pop(),
+    version_no: n + 1, uploaded_at: uploadedAtFromName(oldFile), replaced_by: by || "Applicant",
+  });
+}
+
+async function ensureColumn(table, column, type) {
+  const qi = sequelize.getQueryInterface();
+  const cols = await qi.describeTable(table);
+  if (!cols[column]) await qi.addColumn(table, column, { type });
+}
+
 export function syncPanelTables() {
   if (synced) return Promise.resolve();
   synced = true;
   return Panel.sync()
     .then(() => PanelMember.sync())
     .then(() => PanelAssignment.sync())
+    .then(() => ensureColumn("erb_panel_assignments", "email_job_id", DataTypes.STRING(120)))
+    .then(() => ApplicationDocumentVersion.sync())
     .catch((err) => {
       synced = false;
       console.error("[panel] table sync error:", err.message);

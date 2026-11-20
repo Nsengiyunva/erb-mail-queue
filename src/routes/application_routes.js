@@ -12,6 +12,7 @@ import applicationQueue from "../queues/application_queue.js";
 import applicationStatusEmailQueue from "../queues/application_status_email_queue.js";
 import { supersedeActiveAssignments } from "../utils/panel-models.js";
 import { notifyApplicantResubmitted } from "../utils/panel-notify.js";
+import { archiveReplacedDocument } from "../utils/panel-models.js";
 import { PaymentTransaction, normaliseStatus, sendAccountsVerificationReceipt, sendRegistrationFeeReceipt, advanceIfPaymentAlreadyVerified, findGatewayConfirmedPayment } from "../controllers/receipt-controller.js";
 import { resolveQuotedFee, erbFeeFor, QUOTED_FEES, CHARGED_FEES } from "../utils/fee-schedule.js";
 import ApplicationCommentModel from "../models/ApplicationComment.js";
@@ -571,6 +572,18 @@ router.post(
       // segments when it's concatenated into a URL, which is what was
       // producing 404s on the frontend.
       const filePath = path.basename(req.file.path);
+
+      // ── Keep the original when a sent-back application's document is replaced ──
+      // The previous file stays in the uploads folder; this records it as an earlier
+      // version so staff and the allocated panel member can still open what was
+      // originally submitted. Best-effort: never blocks the applicant's upload.
+      const previousFile = application[column];
+      if (previousFile && String(application.status || "").toUpperCase() === "DEFERRED" && column !== "payment_receipt_path") {
+        await archiveReplacedDocument({
+          applicationId: application.id, column, title: normalizedTitle,
+          oldFile: previousFile, newFile: filePath, by: "Applicant",
+        }).catch((err) => console.error("[document-versions] could not archive previous file:", err.message));
+      }
 
       // ── Update application ──────────────────────────────────────────
       await application.update({ [column]: filePath });
