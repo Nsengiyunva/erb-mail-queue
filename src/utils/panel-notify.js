@@ -3,7 +3,7 @@
 // workers/application_status_email_worker.js).
 //
 //   PANEL_ASSIGNED        → the panel member, listing the applications allocated to them
-//   EVALUATION_SUBMITTED  → Registrar / Registration Officer: a member submitted an evaluation
+//   EVALUATION_SUBMITTED  → Registrar / Registration Officer: a member submitted an evaluation (the application is now in Board review)
 //   APPLICANT_RESUBMITTED → Registrar / Registration Officer: an applicant resubmitted after a send-back
 //
 // Panel members' comments are NEVER e-mailed to applicants — applicants are
@@ -44,11 +44,11 @@ export async function notifyMemberAssigned({ member, panel, applications }) {
   return job?.id != null ? String(job.id) : null;
 }
 
-export async function notifyEvaluationSubmitted({ trackingNumber, applicantName, applicationType, applicationId, evaluatorName, panelName, summary }) {
+export async function notifyEvaluationSubmitted({ trackingNumber, applicantName, applicationType, applicationId, evaluatorName, panelName, summary, movedToBoard = false }) {
   for (const to of reviewTeamRecipients()) {
     await queueOne("panel-evaluation-submitted-email", {
       type: "EVALUATION_SUBMITTED",
-      to, trackingNumber, applicantName, applicationType, applicationId, evaluatorName, panelName, summary,
+      to, trackingNumber, applicantName, applicationType, applicationId, evaluatorName, panelName, summary, movedToBoard,
     });
   }
 }

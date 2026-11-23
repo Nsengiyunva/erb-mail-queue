@@ -2,6 +2,9 @@
 //
 // Pipeline position:  Payment review → AWAITING_ALLOCATION → PANEL_REVIEW → Board review
 // (Board review is still ACCOUNTS_APPROVED, so nothing after it changes.)
+// When the panel member submits their evaluation the application moves to Board
+// review automatically — the Registrar no longer has to forward it. At Board
+// review the Registration Officer can still approve it or send it back.
 //
 // Soft-auth, same convention as the rest of erb-helper:
 //   x-user-role   admin `level` (REGISTRAR | REGISTRATION | CHAIRMAN | PANEL …)
@@ -285,6 +288,53 @@ router.post("/assign", requireStaff, async (req, res) => {
   }
 });
 
+// Moves an application whose panel evaluation is in to Board review.
+// Used automatically when a panel member submits (see POST /application/:id/submit)
+// and by the startup catch-up below. The status change is conditional on the
+// application still being in PANEL_REVIEW, so a concurrent send-back or
+// re-assignment is never overwritten. Returns true when it moved.
+async function moveToBoardReview(application, assignment, { by, role, message }) {
+  const [moved] = await Application.update(
+    { status: PANEL_STATUS.BOARD_REVIEW },
+    { where: { id: application.id, status: PANEL_STATUS.PANEL_REVIEW } }
+  );
+  if (!moved) return false;
+  await assignment.update({ status: "FORWARDED" });
+  await ApplicationComment.create({
+    application_id: application.id, event: "PANEL_FORWARDED", visibility: "INTERNAL",
+    author_type: "SYSTEM", author_name: by || "ERB System", author_role: role || null,
+    message,
+  }).catch((e) => console.error("[panel] could not log move to Board review:", e.message));
+  return true;
+}
+
+// Catch-up for evaluations submitted before automatic forwarding existed (or
+// whose move failed part-way): any application still in PANEL_REVIEW whose
+// live assignment is SUBMITTED goes on to Board review. Run once at startup.
+export async function backfillSubmittedEvaluations() {
+  await syncPanelTables();
+  const submitted = await PanelAssignment.findAll({
+    where: { status: "SUBMITTED" },
+    include: [{ model: PanelMember, as: "member" }],
+    order: [["id", "ASC"]],
+  });
+  let moved = 0;
+  for (const a of submitted) {
+    try {
+      const application = await Application.findByPk(a.application_id);
+      if (!application) continue;
+      const ok = await moveToBoardReview(application, a, {
+        message: `Panel evaluation by ${a.member?.name || "the panel member"} was already submitted — moved to Board review.`,
+      });
+      if (ok) moved++;
+    } catch (err) {
+      console.error(`[panel] backfill: could not move application ${a.application_id} to Board review:`, err.message);
+    }
+  }
+  if (moved) console.log(`[panel] backfill: ${moved} submitted evaluation(s) moved to Board review`);
+  return moved;
+}
+
 // Registrar / Registration Officer forwards an evaluated application to Board review.
 router.post("/application/:id/forward", requireStaff, async (req, res) => {
   const { comment, forwarded_by, force } = req.body || {};
@@ -562,7 +612,8 @@ router.post("/application/:id/comments", resolveMember, async (req, res) => {
   }
 });
 
-// Member sends their evaluation to the Registrar / Registration Officer.
+// Member submits their evaluation. The Registrar / Registration Officer is
+// e-mailed, and the application moves straight on to Board review.
 router.post("/application/:id/submit", resolveMember, async (req, res) => {
   try {
     const access = await memberAccess(req.member, req.params.id);
@@ -570,17 +621,36 @@ router.post("/application/:id/submit", resolveMember, async (req, res) => {
     const { text, visible } = cleanMessage(req.body?.message);
     if (!visible) return fail(res, 400, "Add a short evaluation summary for the Registrar before submitting");
     const application = await Application.findByPk(req.params.id);
+    if (!application) return fail(res, 404, "Application not found");
     await access.assignment.update({ status: "SUBMITTED", submitted_at: new Date() });
     await ApplicationComment.create({
       application_id: req.params.id, event: "PANEL_EVALUATION", visibility: "INTERNAL",
       author_type: "ADMIN", author_role: "PANEL", author_name: req.member.name, author_id: String(req.member.id), message: text,
     });
+
+    // Panel has submitted → Board review. If this fails the evaluation is still
+    // recorded (assignment stays SUBMITTED) and the Registrar can forward it by
+    // hand, or the next startup catch-up will.
+    let movedToBoard = false;
+    try {
+      movedToBoard = await moveToBoardReview(application, access.assignment, {
+        by: req.member.name, role: "PANEL",
+        message: `Panel evaluation submitted by ${req.member.name}${req.member.panel?.name ? ` (${req.member.panel.name})` : ""} — moved to Board review.`,
+      });
+    } catch (err) {
+      console.error(`[panel] could not move application ${application.id} to Board review:`, err);
+    }
+
     const raw = application.toJSON();
     await notifyEvaluationSubmitted({
       trackingNumber: tracking(raw.id), applicantName: formatApplicantName(raw), applicationType: raw.type,
       applicationId: raw.id, evaluatorName: req.member.name, panelName: req.member.panel?.name, summary: text,
+      movedToBoard,
     });
-    res.json({ message: "Evaluation submitted to the Registrar" });
+    res.json({
+      message: movedToBoard ? "Evaluation submitted — the application has moved to Board review" : "Evaluation submitted to the Registrar",
+      moved_to_board_review: movedToBoard,
+    });
   } catch (err) {
     console.error("[panel] submit:", err);
     fail(res, 500, "Could not submit your evaluation");

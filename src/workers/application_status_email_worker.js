@@ -42,7 +42,7 @@ const commentHtml = (text, color) => commentToHtml(text, {
 // in one worker (rather than one queue per event) mirrors how close
 // they are: same recipient, same idempotent EmailLog bookkeeping, only
 // the copy changes.
-function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays, approvalLetter, memberName, panelName, applications, evaluatorName, summary }) {
+function buildEmail({ type, applicantName, trackingNumber, applicationType, reason, licenseNumber, applicationId, registrationFee, authorName, deleteOn, idleDays, approvalLetter, memberName, panelName, applications, evaluatorName, summary, movedToBoard }) {
   const name         = applicantName || 'Applicant';
   const licenceLabel = applicationType || 'licence';
   const trackingLine = trackingNumber
@@ -191,7 +191,9 @@ function buildEmail({ type, applicantName, trackingNumber, applicationType, reas
         <p><strong>${escapeHtml(evaluatorName || 'A panel member')}</strong>${panelName ? ` (${escapeHtml(panelName)})` : ''} has submitted their evaluation for ${escapeHtml(applicantName || 'an applicant')}'s ${escapeHtml(applicationType || 'licence')} application.</p>
         ${trackingLine}
         ${summary ? `<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px;margin:16px 0;"><p style="margin:0 0 6px;color:#1e3a8a;"><strong>Evaluation summary (internal):</strong></p><div style="color:#1e3a8a;line-height:1.5;">${commentHtml(summary, '#1e3a8a')}</div></div>` : ''}
-        <p>Please review the panel comments and either send the application back to the applicant or forward it to Board review.</p>
+        ${movedToBoard
+          ? '<p>The application has moved to <strong>Board review</strong>. Please review the panel comments, then approve it or send it back to the applicant.</p>'
+          : '<p>Please review the panel comments and either send the application back to the applicant or forward it to Board review.</p>'}
         <p style="text-align:center;margin:26px 0;">
           <a href="${PORTAL_URL}/submitted-applications" style="background-color:#1e40af;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">Review application</a>
         </p>

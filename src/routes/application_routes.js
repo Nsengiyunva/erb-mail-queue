@@ -2503,8 +2503,9 @@ router.post("/board_approve_bulk", async (req, res) => {
 // resubmits (PENDING → sponsor approval → SPONSOR_APPROVED → …). Because a
 // Board-stage send-back happens AFTER Accounts verified the fee
 // (accounts_verified_at is kept), the resubmission then skips Payment
-// review and goes straight back to ACCOUNTS_APPROVED (this review step) —
-// see advanceIfPaymentAlreadyVerified in receipt-controller.js.
+// review and goes straight back to AWAITING_ALLOCATION (the allocation
+// pool, to be re-assigned to a panel) — see advanceIfPaymentAlreadyVerified
+// in receipt-controller.js.
 router.post("/defer", async (req, res) => {
   const { applicationID, comment, deferred_by } = req.body || {};
   try {

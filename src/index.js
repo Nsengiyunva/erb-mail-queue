@@ -14,7 +14,7 @@ import receiptRoutes     from "./routes/receipt_routes.js";
 import { backfillLegacySentReceipts } from "./routes/sent_receipt_routes.js";
 import reportRoutes      from "./routes/report_routes.js";
 import applicationRoutes from "./routes/application_routes.js";
-import panelRoutes from "./routes/panel_routes.js";
+import panelRoutes, { backfillSubmittedEvaluations } from "./routes/panel_routes.js";
 import invoiceRoutes     from "./routes/invoice_routes.js";
 
 import { PaymentTransaction, normaliseStatus, onConfirmedPaymentUpdate, backfillPreviouslyVerifiedResubmissions } from "./controllers/receipt-controller.js";
@@ -251,6 +251,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     // that are still waiting in Payment review → Board review.
     backfillPreviouslyVerifiedResubmissions().catch(err =>
       console.error("[auto-verify] previously-verified backfill failed:", err.message)
+    );
+    // Panel evaluations submitted before automatic forwarding existed (or whose
+    // move failed part-way) that are still sitting in Panel review → Board review.
+    backfillSubmittedEvaluations().catch(err =>
+      console.error("[panel] submitted-evaluation backfill failed:", err.message)
     );
     // Receipts emailed before their send status was recorded → mark SENT so
     // engineers can see them on "My Receipts" / "Your Payment Receipts".

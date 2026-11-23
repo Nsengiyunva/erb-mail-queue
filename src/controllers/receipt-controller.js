@@ -715,9 +715,9 @@ export async function sendRenewalRejectedNotice(tx, reason) {
 //     applicant isn't asked to pay twice. It sends nothing and moves no
 //     application on.
 //   • One exception to the Payment-review step, for NEW applications: an
-//     application whose fee Accounts ALREADY verified and which the Board
-//     then sent back goes straight to Board review when it is resubmitted
-//     (advanceIfPaymentAlreadyVerified below).
+//     application whose fee Accounts ALREADY verified and which was then
+//     sent back goes straight to the allocation queue (AWAITING_ALLOCATION)
+//     when it is resubmitted (advanceIfPaymentAlreadyVerified below).
 //
 // "Confirmed" deliberately means the VM1 payment watcher's webhook
 // (POST /api/erb/receipt/payment-update, see index.js) — NOT the
@@ -763,6 +763,17 @@ async function logAutoEvent(applicationId, message) {
 // don't qualify for the resubmission shortcut.
 export const SYSTEM_AUTO_VERIFIER = 'ERB System (online payment)'
 
+// A resubmission can be sitting in any of these when this runs, depending on
+// how far the sponsor step got: PENDING (the final-submit save, before the
+// worker has set the pipeline status), AWAITING_SPONSOR_APPROVAL (the wizard's
+// submit status — stays here if a sponsor entry has no letter on file), or
+// SPONSOR_APPROVED (all sponsors signed → Payment review). For an application
+// Accounts has ALREADY verified, none of them should end up in Payment review
+// or wait on sponsors again: it goes straight to the allocation pool.
+// Brand-new applications never have accounts_verified_at, so they are never
+// matched here.
+const RESUBMISSION_SOURCE_STATUSES = ['PENDING', 'AWAITING_SPONSOR_APPROVAL', 'SPONSOR_APPROVED']
+
 export async function advanceIfPaymentAlreadyVerified(applicationId) {
   if (!applicationId || !/^\d+$/.test(String(applicationId))) return { advanced: false, reason: 'not an application id' }
 
@@ -770,7 +781,9 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
   if (!application) return { advanced: false, reason: 'application not found' }
   const raw = application.toJSON()
 
-  if (String(raw.status || '').toUpperCase() !== 'SPONSOR_APPROVED') return { advanced: false, reason: `status ${raw.status}` }
+  if (!RESUBMISSION_SOURCE_STATUSES.includes(String(raw.status || '').toUpperCase())) return { advanced: false, reason: `status ${raw.status}` }
+  // Only a genuinely submitted application — never an applicant's in-progress draft.
+  if (String(raw.draft_type || '').toUpperCase() !== 'COMPLETE') return { advanced: false, reason: 'not a final submission' }
   if (!raw.accounts_verified_at) return { advanced: false, reason: 'payment not previously verified' }
   if (raw.accounts_verified_by === SYSTEM_AUTO_VERIFIER) return { advanced: false, reason: 'verified automatically, not by Accounts' }
 
@@ -778,7 +791,7 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
   // approval, or the startup backfill) can't both log the move.
   const [count] = await Application.update(
     { status: 'AWAITING_ALLOCATION' },
-    { where: { id: raw.id, status: 'SPONSOR_APPROVED' } }
+    { where: { id: raw.id, status: { [Op.in]: RESUBMISSION_SOURCE_STATUSES } } }
   )
   if (!count) return { advanced: false, reason: 'already moved' }
 
@@ -792,12 +805,16 @@ export async function advanceIfPaymentAlreadyVerified(applicationId) {
   return { advanced: true }
 }
 
-// Startup catch-up for resubmissions already sitting in Payment review
-// even though their payment was verified before they were sent back.
+// Startup catch-up for resubmissions already sitting in Payment review (or
+// stuck at the sponsor step) even though their payment was verified before
+// they were sent back.
 export async function backfillPreviouslyVerifiedResubmissions() {
   const waiting = await Application.findAll({
     where: {
-      status: 'SPONSOR_APPROVED',
+      // PENDING is left out on purpose: at startup it can be a submission the
+      // worker is processing right now, and the worker handles its own move.
+      status: { [Op.in]: ['AWAITING_SPONSOR_APPROVAL', 'SPONSOR_APPROVED'] },
+      draft_type: 'COMPLETE',
       accounts_verified_at: { [Op.ne]: null },
       [Op.or]: [{ accounts_verified_by: null }, { accounts_verified_by: { [Op.ne]: SYSTEM_AUTO_VERIFIER } }],
     },
@@ -808,7 +825,7 @@ export async function backfillPreviouslyVerifiedResubmissions() {
     const r = await advanceIfPaymentAlreadyVerified(a.id).catch(() => ({ advanced: false }))
     if (r.advanced) advanced++
   }
-  if (advanced) console.log(`[auto-verify] backfill: ${advanced} previously-verified resubmission(s) moved to Board review`)
+  if (advanced) console.log(`[auto-verify] backfill: ${advanced} previously-verified resubmission(s) moved to the allocation queue`)
   return advanced
 }
 
